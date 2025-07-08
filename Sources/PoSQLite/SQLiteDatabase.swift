@@ -47,10 +47,10 @@ final class SQLiteDatabase {
     
     init(fileURL: URL) {
         self.recyclableHandlePool = SQLiteHandlePool.getHandlePool(with: fileURL.standardizedFileURL.path)
-        
-        DispatchQueue.once(name: "com.Potato.sqlite.swift.purge", {
+
 #if canImport(UIKit)
-            let purgeFreeHandleQueue: DispatchQueue = DispatchQueue(label: "com.Potato.sqlite.swift.purge")
+        DispatchQueue.once(name: "com.potato.sqlite.swift.purge", {
+            let purgeFreeHandleQueue: DispatchQueue = DispatchQueue(label: "com.potato.sqlite.swift.purge")
             _ = NotificationCenter.default.addObserver(
                 forName: UIApplication.didReceiveMemoryWarningNotification,
                 object: nil,
@@ -60,8 +60,8 @@ final class SQLiteDatabase {
                         SQLiteDatabase.purge()
                     }
                 })
-#endif
         })
+#endif
     }
     
     private static var threadedHandles = ThreadLocal<[String: RecyclableHandle]>(defaultValue: [:])

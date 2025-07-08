@@ -17,9 +17,12 @@ final class SQLiteHandle {
     private var handle: SQLite3?
     let path: String
     init(withPath path: String) {
-        DispatchQueue.once(name: "com.potato.posqlite.handle") {
+        DispatchQueue.once(name: "com.potato.sqlite.handle") {
+            // 多线程模式
             sqlite3_config_multithread()
-            sqlite3_config_memstatus(Int32(truncating: false))
+            // 禁用内存统计
+            sqlite3_config_memstatus(0)
+            // 打印日志
             sqlite3_config_log({ (_, code, message) in
                 let msg = (message != nil) ? String(cString: message!) : ""
                 SQLiteError.reportSQLiteGlobal(code: Int(code), msg: msg)
@@ -37,7 +40,7 @@ final class SQLiteHandle {
         if res != SQLITE_OK {
             throw SQLiteError(code: res, description: String(cString: sqlite3_errmsg(handle)))
         } else {
-            try execute(sql: "pragma journal_mode = wal;pragma synchronous = normal;pragma locking_mode = normal")
+            try execute(sql: "PRAGMA journal_mode=wal;PRAGMA synchronous=normal;PRAGMA locking_mode=normal;PRAGMA mmap_size=268435456;PRAGMA busy_timeout=10000;")
         }
     }
     
@@ -116,11 +119,11 @@ extension SQLiteHandle {
     }
     
     func commit() throws {
-        try execute(sql: "COMMIT TRANSACTION")
+        try execute(sql: "COMMIT TRANSACTION;")
     }
     
     func rollback() throws {
-        try execute(sql: "ROLLBACK TRANSACTION")
+        try execute(sql: "ROLLBACK TRANSACTION;")
     }
     
     func lastInsertRowID() -> Int {
@@ -138,6 +141,31 @@ extension SQLiteHandle {
     func changes() -> Int {
         let res = sqlite3_changes(handle)
         return Int(res)
+    }
+    
+    /// wal checkPoint
+    /// - Returns: pnLog: size of WAL log in frames  pnCkpt: total number of frames checkpointed
+    func checkPoint() throws -> (pnLog: Int32, pnCkpt: Int32) {
+        var pnLog: Int32 = 0
+        var pnCkpt: Int32 = 0
+        let res = sqlite3_wal_checkpoint_v2(handle, nil, SQLITE_CHECKPOINT_TRUNCATE, &pnLog, &pnCkpt)
+        if res != SQLITE_OK {
+            throw SQLiteError(code: res, description: String(cString: sqlite3_errmsg(handle)))
+        }
+        return (pnLog, pnCkpt)
+    }
+    
+    /// default 1000
+    func configAutoCheckPoint(_ page: Int) throws {
+        try execute(sql: "PRAGMA wal_autocheckpoint=\(page);")
+    }
+    
+    /// default 10 * 1000
+    func configBusyTimeout(_ ms: Int) throws {
+        let res = sqlite3_busy_timeout(handle, Int32(ms))
+        if res != SQLITE_OK {
+            throw SQLiteError(code: res, description: String(cString: sqlite3_errmsg(handle)))
+        }
     }
     
     func errCode() -> Int {
