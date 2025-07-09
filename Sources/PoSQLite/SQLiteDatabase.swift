@@ -30,22 +30,22 @@ public protocol SQLiteDatabaseProtocol {
     func errMsg() throws -> String?
 }
 
-final class SQLiteDatabase {
+public final class SQLiteDatabase {
     private let recyclableHandlePool: RecyclableHandlePool
     
     var handlePool: SQLiteHandlePool {
         recyclableHandlePool.rawValue
     }
     
-    var path: String {
+    public var path: String {
         handlePool.path
     }
     
-    convenience init(path: String) {
+    public convenience init(path: String) {
         self.init(fileURL: URL(fileURLWithPath: path))
     }
     
-    init(fileURL: URL) {
+    public init(fileURL: URL) {
         self.recyclableHandlePool = SQLiteHandlePool.getHandlePool(with: fileURL.standardizedFileURL.path)
 
 #if canImport(UIKit)
@@ -92,7 +92,7 @@ final class SQLiteDatabase {
         return handlePool.isBlockaded
     }
     
-    public typealias OnClosed = SQLiteHandlePool.OnDrained
+    public typealias OnClosed = () throws -> Void
     
     public func close(onClosed: OnClosed) rethrows {
         try handlePool.drain(onDrained: onClosed)
@@ -133,59 +133,59 @@ final class SQLiteDatabase {
 // MARK: - Operations
 extension SQLiteDatabase: SQLiteDatabaseProtocol {
     
-    func prepare(statement stat: String) throws -> SQLiteStmt {
+    public func prepare(statement stat: String) throws -> SQLiteStmt {
         let recyclableHandle = try flowOut()
         return try recyclableHandle.rawValue.prepare(statement: stat)
     }
     
-    func execute(sql: String, isWrite: Bool = false) throws {
+    public func execute(sql: String, isWrite: Bool) throws {
         if isWrite { handlePool.wLock() }
         defer { if isWrite { handlePool.wUnlock() } }
         let recyclableHandle = try flowOut()
         try recyclableHandle.rawValue.execute(sql: sql)
     }
     
-    func begin(_ transaction: SQLiteTransaction) throws {
+    public func begin(_ transaction: SQLiteTransaction) throws {
         let recyclableHandle = try flowOut()
         try recyclableHandle.rawValue.begin(transaction)
         SQLiteDatabase.threadedHandles.value[path] = recyclableHandle
     }
     
-    func commit() throws {
+    public func commit() throws {
         let recyclableHandle = try flowOut()
         try recyclableHandle.rawValue.commit()
         SQLiteDatabase.threadedHandles.value.removeValue(forKey: path)
     }
     
-    func rollback() throws {
+    public func rollback() throws {
         let recyclableHandle = try flowOut()
         try recyclableHandle.rawValue.rollback()
         SQLiteDatabase.threadedHandles.value.removeValue(forKey: path)
     }
     
-    func lastInsertRowID() throws -> Int {
+    public func lastInsertRowID() throws -> Int {
         let recyclableHandle = try flowOut()
         return recyclableHandle.rawValue.lastInsertRowID()
     }
     
     /// 自数据库链接被打开起，通过insert，update，delete语句所影响的数据行数
-    func totalChanges() throws -> Int {
+    public func totalChanges() throws -> Int {
         let recyclableHandle = try flowOut()
         return recyclableHandle.rawValue.totalChanges()
     }
     
     /// 最近一条insert，update，delete语句所影响的数据行数
-    func changes() throws -> Int {
+    public func changes() throws -> Int {
         let recyclableHandle = try flowOut()
         return recyclableHandle.rawValue.changes()
     }
     
-    func errCode() throws -> Int {
+    public func errCode() throws -> Int {
         let recyclableHandle = try flowOut()
         return recyclableHandle.rawValue.errCode()
     }
     
-    func errMsg() throws -> String? {
+    public func errMsg() throws -> String? {
         let recyclableHandle = try flowOut()
         return recyclableHandle.rawValue.errMsg()
     }

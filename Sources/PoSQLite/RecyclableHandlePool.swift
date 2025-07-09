@@ -123,7 +123,7 @@ final class SQLiteHandlePool {
         return rwlock.isWriting
     }
 
-    public typealias OnDrained = () throws -> Void
+    typealias OnDrained = () throws -> Void
 
     func drain(onDrained: OnDrained) rethrows {
         blockade()

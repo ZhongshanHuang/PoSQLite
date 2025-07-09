@@ -13,10 +13,10 @@ public enum SQLiteTransaction: String {
 }
 
 
-final class SQLiteHandle {
+public final class SQLiteHandle {
     private var handle: SQLite3?
-    let path: String
-    init(withPath path: String) {
+    public let path: String
+    public init(withPath path: String) {
         DispatchQueue.once(name: "com.potato.sqlite.handle") {
             // 多线程模式
             sqlite3_config_multithread()
@@ -31,7 +31,7 @@ final class SQLiteHandle {
         self.path = path
     }
     
-    func open() throws {
+    public func open() throws {
         let directory = URL(fileURLWithPath: path).deletingLastPathComponent().path
         try File.createDirectoryWithIntermediateDirectories(atPath: directory)
         
@@ -44,7 +44,7 @@ final class SQLiteHandle {
         }
     }
     
-    func close() throws {
+    public func close() throws {
         if handle != nil {
             var res: Int32 = 0
             var stmtFinalized = false
@@ -80,7 +80,7 @@ final class SQLiteHandle {
 
 // MARK: - Operations
 extension SQLiteHandle {
-    func prepare(statement stat: String) throws -> SQLiteStmt {
+    public func prepare(statement stat: String) throws -> SQLiteStmt {
         var statPtr = OpaquePointer(bitPattern: 0)
         /**
         参数
@@ -97,7 +97,7 @@ extension SQLiteHandle {
         return SQLiteStmt(stat: statPtr!)
     }
     
-    func execute(sql: String) throws {
+    public func execute(sql: String) throws {
         /**
          参数
            1.数据库全局句柄
@@ -114,38 +114,38 @@ extension SQLiteHandle {
         }
     }
     
-    func begin(_ transaction: SQLiteTransaction) throws {
+    public func begin(_ transaction: SQLiteTransaction) throws {
         try execute(sql: transaction.rawValue)
     }
     
-    func commit() throws {
+    public func commit() throws {
         try execute(sql: "COMMIT TRANSACTION;")
     }
     
-    func rollback() throws {
+    public func rollback() throws {
         try execute(sql: "ROLLBACK TRANSACTION;")
     }
     
-    func lastInsertRowID() -> Int {
+    public func lastInsertRowID() -> Int {
         let res = sqlite3_last_insert_rowid(handle)
         return Int(res)
     }
     
     /// 自数据库链接被打开起，通过insert，update，delete语句所影响的数据行数
-    func totalChanges() -> Int {
+    public func totalChanges() -> Int {
         let res = sqlite3_total_changes(handle)
         return Int(res)
     }
     
     /// 最近一条insert，update，delete语句所影响的数据行数
-    func changes() -> Int {
+    public func changes() -> Int {
         let res = sqlite3_changes(handle)
         return Int(res)
     }
     
     /// wal checkPoint
     /// - Returns: pnLog: size of WAL log in frames  pnCkpt: total number of frames checkpointed
-    func checkPoint() throws -> (pnLog: Int32, pnCkpt: Int32) {
+    public func checkPoint() throws -> (pnLog: Int32, pnCkpt: Int32) {
         var pnLog: Int32 = 0
         var pnCkpt: Int32 = 0
         let res = sqlite3_wal_checkpoint_v2(handle, nil, SQLITE_CHECKPOINT_TRUNCATE, &pnLog, &pnCkpt)
@@ -156,23 +156,23 @@ extension SQLiteHandle {
     }
     
     /// default 1000
-    func configAutoCheckPoint(_ page: Int) throws {
+    public func configAutoCheckPoint(_ page: Int) throws {
         try execute(sql: "PRAGMA wal_autocheckpoint=\(page);")
     }
     
     /// default 10 * 1000
-    func configBusyTimeout(_ ms: Int) throws {
+    public func configBusyTimeout(_ ms: Int) throws {
         let res = sqlite3_busy_timeout(handle, Int32(ms))
         if res != SQLITE_OK {
             throw SQLiteError(code: res, description: String(cString: sqlite3_errmsg(handle)))
         }
     }
     
-    func errCode() -> Int {
+    public func errCode() -> Int {
         return Int(sqlite3_errcode(handle))
     }
     
-    func errMsg() -> String? {
+    public func errMsg() -> String? {
         if let cString = sqlite3_errmsg(handle) {
             return String(cString: cString)
         }

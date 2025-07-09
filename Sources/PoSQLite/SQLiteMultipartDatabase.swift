@@ -19,7 +19,7 @@ public final class SQLiteMultipartDatabase {
         database.close()
     }
     
-    public func inTransaction(_ transaction: SQLiteTransaction = .exclusive, _ exec: (_ db: any SQLiteDatabaseProtocol, _ rollback: UnsafeMutablePointer<Bool>) throws -> Void) {
+    public func inTransaction(_ transaction: SQLiteTransaction = .immediate, _ exec: (_ db: any SQLiteDatabaseProtocol, _ rollback: UnsafeMutablePointer<Bool>) throws -> Void) {
         var shouldRollback = false
         do {
             try database.begin(transaction)
