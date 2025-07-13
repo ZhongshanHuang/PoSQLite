@@ -5,7 +5,7 @@ typealias RecyclableHandlePool = Recyclable<SQLiteHandlePool>
 
 final class SQLiteHandlePool {
     
-    private class Wrap {
+    private final class Wrap {
         let handlePool: SQLiteHandlePool
         var reference: Int = 0
         init(_ handlePool: SQLiteHandlePool) {
@@ -15,8 +15,8 @@ final class SQLiteHandlePool {
     
     private static let spin = Spin()
     private static var pools: [String: Wrap] = [:]
-    static private let maxConcurrency = max(maxHardwareConcurrency, 64)
-    static private let maxHardwareConcurrency = ProcessInfo.processInfo.processorCount
+    private static let maxConcurrency = max(maxHardwareConcurrency, 64)
+    private static let maxHardwareConcurrency = ProcessInfo.processInfo.processorCount
     
     static func getHandlePool(with path: String) -> RecyclableHandlePool {
         spin.lock()

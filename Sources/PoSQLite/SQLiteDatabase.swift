@@ -41,11 +41,11 @@ public final class SQLiteDatabase {
     private static var threadedHandles = ThreadLocal<[String: RecyclableHandle]>(defaultValue: [:])
     
     func flowOut() throws -> RecyclableHandle {
-        let threadedHandles = SQLiteDatabase.threadedHandles.value
-        if let handle = threadedHandles[path] {
+        if let handle = Self.threadedHandles.value[path] {
             return handle
         }
-        return try handlePool.flowOut()
+        let handle = try handlePool.flowOut()
+        return handle
     }
 
     /// Since It is using lazy initialization,
@@ -109,10 +109,19 @@ extension SQLiteDatabase {
     
     public func prepare(statement stat: String) throws -> SQLiteStmt {
         let recyclableHandle = try flowOut()
-        withUnsafePointer(to: recyclableHandle.rawValue) { point in
-            print("current: \(Thread.current), handle: \(point)")
+        let stat = try recyclableHandle.rawValue.prepare(statement: stat)
+        let path = path
+        stat.onFinalize = {
+            recyclableHandle.refCount -= 1
+            if recyclableHandle.refCount == 0 {
+                Self.threadedHandles.value.removeValue(forKey: path)
+            }
         }
-        return try recyclableHandle.rawValue.prepare(statement: stat)
+        recyclableHandle.refCount += 1
+        if recyclableHandle.refCount == 1 {
+            Self.threadedHandles.value[path] = recyclableHandle
+        }
+        return stat
     }
     
     // write: CREATE TABLE, DELETE, ALTER; INSERT, UPDATE, REPLACE
@@ -126,19 +135,28 @@ extension SQLiteDatabase {
     public func begin(_ transaction: SQLiteTransaction) throws {
         let recyclableHandle = try flowOut()
         try recyclableHandle.rawValue.begin(transaction)
-        SQLiteDatabase.threadedHandles.value[path] = recyclableHandle
+        recyclableHandle.refCount += 1
+        if recyclableHandle.refCount == 1 {
+            Self.threadedHandles.value[path] = recyclableHandle
+        }
     }
     
     public func commit() throws {
         let recyclableHandle = try flowOut()
         try recyclableHandle.rawValue.commit()
-        SQLiteDatabase.threadedHandles.value.removeValue(forKey: path)
+        recyclableHandle.refCount -= 1
+        if recyclableHandle.refCount == 0 {
+            Self.threadedHandles.value.removeValue(forKey: path)
+        }
     }
     
     public func rollback() throws {
         let recyclableHandle = try flowOut()
         try recyclableHandle.rawValue.rollback()
-        SQLiteDatabase.threadedHandles.value.removeValue(forKey: path)
+        recyclableHandle.refCount -= 1
+        if recyclableHandle.refCount == 0 {
+            Self.threadedHandles.value.removeValue(forKey: path)
+        }
     }
     
     public func lastInsertRowID() throws -> Int {

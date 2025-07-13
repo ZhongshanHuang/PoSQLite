@@ -1,6 +1,6 @@
 import Foundation
 
-final class ThreadLocal<Value> {
+final class ThreadLocal<Value>: Sendable {
     private final class Wrapper: RawRepresentable {
         typealias RawValue = Value
         var rawValue: RawValue

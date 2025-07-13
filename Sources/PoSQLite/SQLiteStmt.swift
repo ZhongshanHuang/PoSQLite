@@ -11,6 +11,7 @@ public enum SQLiteType: Int32 {
 
 public final class SQLiteStmt {
     private var stat: SQLite3Statement!
+    var onFinalize: (() -> Void)?
     
     deinit {
         try? finalize()
@@ -28,6 +29,8 @@ public final class SQLiteStmt {
         if self.stat != nil {
             try _checkResult(sqlite3_finalize(self.stat))
             self.stat = nil
+            self.onFinalize?()
+            self.onFinalize = nil
         }
     }
     
