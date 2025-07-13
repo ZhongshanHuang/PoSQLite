@@ -39,6 +39,7 @@ public final class SQLiteStmt {
         return res
     }
     
+    /* bind position */
     public func bind(position: Int, _ d: Double) throws {
         try _checkResult(sqlite3_bind_double(self.stat, Int32(position), d))
     }
@@ -75,7 +76,7 @@ public final class SQLiteStmt {
         try _checkResult(sqlite3_bind_null(self.stat, Int32(position)))
     }
     
-    /*  */
+    /* bind name */
     
     public func bind(name: String, _ d: Double) throws {
         try _checkResult(sqlite3_bind_double(self.stat, bindParameterIndex(name: name), d))

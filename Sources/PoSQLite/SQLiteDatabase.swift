@@ -4,36 +4,10 @@ import UIKit
 import Foundation
 import SQLite3
 
-public protocol SQLiteDatabaseProtocol {
-    
-    var canOpen: Bool { get }
-    var isOpened: Bool { get }
-    func close()
-    
-    func prepare(statement stat: String) throws -> SQLiteStmt
-    /// 除了更新和插入算write,，其余的算read，write无法并发执行，所以会主动加锁，防止失败
-    func execute(sql: String, isWrite: Bool) throws
-    
-    func begin(_ transaction: SQLiteTransaction) throws
-    func commit() throws
-    func rollback() throws
-    
-    func lastInsertRowID() throws -> Int
-    
-    /// 自数据库链接被打开起，通过insert，update，delete语句所影响的数据行数
-    func totalChanges() throws -> Int
-    /// 最近一条insert，update，delete语句所影响的数据行数
-    func changes() throws -> Int
-    
-    func errCode() throws -> Int
-    
-    func errMsg() throws -> String?
-}
-
 public final class SQLiteDatabase {
     private let recyclableHandlePool: RecyclableHandlePool
     
-    var handlePool: SQLiteHandlePool {
+    private var handlePool: SQLiteHandlePool {
         recyclableHandlePool.rawValue
     }
     
@@ -130,14 +104,18 @@ public final class SQLiteDatabase {
     
 }
 
-// MARK: - Operations
-extension SQLiteDatabase: SQLiteDatabaseProtocol {
+// MARK: - Base Operations
+extension SQLiteDatabase {
     
     public func prepare(statement stat: String) throws -> SQLiteStmt {
         let recyclableHandle = try flowOut()
+        withUnsafePointer(to: recyclableHandle.rawValue) { point in
+            print("current: \(Thread.current), handle: \(point)")
+        }
         return try recyclableHandle.rawValue.prepare(statement: stat)
     }
     
+    // write: CREATE TABLE, DELETE, ALTER; INSERT, UPDATE, REPLACE
     public func execute(sql: String, isWrite: Bool) throws {
         if isWrite { handlePool.wLock() }
         defer { if isWrite { handlePool.wUnlock() } }
@@ -190,5 +168,46 @@ extension SQLiteDatabase: SQLiteDatabaseProtocol {
         return recyclableHandle.rawValue.errMsg()
     }
     
+}
+
+// MARK: - Convenience Operations
+extension SQLiteDatabase {
+    /// write multi
+    public func executeUpdatesInTransaction(_ transaction: SQLiteTransaction = .immediate, statement: String, doUpdatings: (_ stmt: SQLiteStmt) throws -> Void) throws {
+        handlePool.wLock()
+        defer { handlePool.wUnlock() }
+        
+        let stat = try prepare(statement: statement)
+        do {
+            try begin(transaction)
+            try doUpdatings(stat)
+            try commit()
+        } catch {
+            try? rollback()
+        }
+    }
+    
+    /// write single
+    public func executeUpdate(statement: String, doUpdating: (SQLiteStmt) throws -> Void) throws {
+        handlePool.wLock()
+        defer { handlePool.wUnlock() }
+        
+        let stat = try prepare(statement: statement)
+        try doUpdating(stat)
+        try stat.step()
+    }
+    
+    /// read
+    public func executeQuery(statement: String, doBindings: (_ stmt: SQLiteStmt) throws -> Void, handleRow: (_ stmt: SQLiteStmt) throws -> Void) throws {
+        let stat = try prepare(statement: statement)
+        defer { try? stat.finalize() }
+        try doBindings(stat)
+        var res = try stat.step()
+        
+        while res == SQLITE_ROW {
+            try handleRow(stat)
+            res = try stat.step()
+        }
+    }
 }
 
