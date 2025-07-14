@@ -9,12 +9,15 @@ public enum SQLiteType: Int32 {
     case null = 5       // SQLITE_NULL
 }
 
-public final class SQLiteStmt {
+public struct SQLiteStmt: ~Copyable {
     private var stat: SQLite3Statement!
     var onFinalize: (() -> Void)?
     
     deinit {
-        try? finalize()
+        if self.stat != nil {
+            sqlite3_finalize(self.stat)
+            self.onFinalize?()
+        }
     }
     
     internal init(stat: SQLite3Statement) {
@@ -25,7 +28,7 @@ public final class SQLiteStmt {
         try _checkResult(sqlite3_reset(self.stat))
     }
     
-    public func finalize() throws {
+    public mutating func finalize() throws {
         if self.stat != nil {
             try _checkResult(sqlite3_finalize(self.stat))
             self.stat = nil

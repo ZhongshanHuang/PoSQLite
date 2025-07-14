@@ -109,7 +109,7 @@ extension SQLiteDatabase {
     
     public func prepare(statement stat: String) throws -> SQLiteStmt {
         let recyclableHandle = try flowOut()
-        let stat = try recyclableHandle.rawValue.prepare(statement: stat)
+        var stat = try recyclableHandle.rawValue.prepare(statement: stat)
         let path = path
         stat.onFinalize = {
             recyclableHandle.refCount -= 1
@@ -191,7 +191,7 @@ extension SQLiteDatabase {
 // MARK: - Convenience Operations
 extension SQLiteDatabase {
     /// write multi
-    public func executeUpdatesInTransaction(_ transaction: SQLiteTransaction = .immediate, statement: String, doUpdatings: (_ stmt: SQLiteStmt) throws -> Void) throws {
+    public func executeUpdatesInTransaction(_ transaction: SQLiteTransaction = .immediate, statement: String, doUpdatings: (_ stmt: borrowing SQLiteStmt) throws -> Void) throws {
         handlePool.wLock()
         defer { handlePool.wUnlock() }
         
@@ -206,7 +206,7 @@ extension SQLiteDatabase {
     }
     
     /// write single
-    public func executeUpdate(statement: String, doUpdating: (SQLiteStmt) throws -> Void) throws {
+    public func executeUpdate(statement: String, doUpdating: (borrowing SQLiteStmt) throws -> Void) throws {
         handlePool.wLock()
         defer { handlePool.wUnlock() }
         
@@ -216,8 +216,8 @@ extension SQLiteDatabase {
     }
     
     /// read
-    public func executeQuery(statement: String, doBindings: (_ stmt: SQLiteStmt) throws -> Void, handleRow: (_ stmt: SQLiteStmt) throws -> Void) throws {
-        let stat = try prepare(statement: statement)
+    public func executeQuery(statement: String, doBindings: (_ stmt: borrowing SQLiteStmt) throws -> Void, handleRow: (_ stmt: borrowing SQLiteStmt) throws -> Void) throws {
+        var stat = try prepare(statement: statement)
         defer { try? stat.finalize() }
         try doBindings(stat)
         var res = try stat.step()
