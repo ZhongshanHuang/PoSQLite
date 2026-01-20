@@ -5,11 +5,12 @@ import SQLiteBridging
 typealias SQLite3 = OpaquePointer
 typealias SQLite3Statement = OpaquePointer
 
+/// 未加锁(UNLOCKED)、共享 (SHARED)、保留(RESERVED)、未决(PENDING)、排它(EXCLUSIVE)
 /// 事务获取锁的模式
 public enum SQLiteTransaction: String {
-    case exclusive = "BEGIN EXCLUSIVE TRANSACTION"
-    case deferred = "BEGIN DEFERRED TRANSACTION"
-    case immediate = "BEGIN IMMEDIATE TRANSACTION"
+    case deferred = "BEGIN DEFERRED TRANSACTION" // UNLOCKED
+    case immediate = "BEGIN IMMEDIATE TRANSACTION" // RESERVED
+    case exclusive = "BEGIN EXCLUSIVE TRANSACTION" // EXCLUSIVE
 }
 
 
@@ -40,7 +41,7 @@ public final class SQLiteHandle {
         if res != SQLITE_OK {
             throw SQLiteError(code: res, description: String(cString: sqlite3_errmsg(handle)))
         } else {
-            try execute(sql: "PRAGMA journal_mode=wal;PRAGMA synchronous=normal;PRAGMA locking_mode=normal;PRAGMA mmap_size=268435456;PRAGMA busy_timeout=10000;")
+            try execute(sql: "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA wal_autocheckpoint=5000;PRAGMA mmap_size=268435456;PRAGMA busy_timeout=3000;")
         }
     }
     

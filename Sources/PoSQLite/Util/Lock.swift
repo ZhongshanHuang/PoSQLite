@@ -126,9 +126,7 @@ extension DispatchQueue {
 
     static func once(name: String, _ block: () -> Void) {
         spin.lock(); defer { spin.unlock() }
-        guard !tracker.contains(name) else {
-            return
-        }
+        guard !tracker.contains(name) else { return }
         block()
         tracker.insert(name)
     }

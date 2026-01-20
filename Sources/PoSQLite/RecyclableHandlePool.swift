@@ -16,7 +16,7 @@ final class SQLiteHandlePool {
     private static let spin = Spin()
     private static var pools: [String: Wrap] = [:]
     private static let maxConcurrency = max(maxHardwareConcurrency, 64)
-    private static let maxHardwareConcurrency = ProcessInfo.processInfo.processorCount
+    private static var maxHardwareConcurrency: Int { ProcessInfo.processInfo.processorCount }
     
     static func getHandlePool(with path: String) -> RecyclableHandlePool {
         spin.lock()

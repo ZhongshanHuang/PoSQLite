@@ -12,6 +12,7 @@ int sqlite3_config_multithread(void)
     return sqlite3_config(SQLITE_CONFIG_MULTITHREAD);
 }
 
+/// 该参数启用或禁用内存分配统计信息的收集
 int sqlite3_config_memstatus(int a)
 {
     return sqlite3_config(SQLITE_CONFIG_MEMSTATUS, a);
