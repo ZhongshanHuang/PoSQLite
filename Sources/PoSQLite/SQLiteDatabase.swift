@@ -39,6 +39,7 @@ public final class SQLiteDatabase {
     }
     
     private static var threadedHandles = ThreadLocal<[String: RecyclableHandle]>(defaultValue: [:])
+    private static var threadedTransactionDepths = ThreadLocal<[String: Int]>(defaultValue: [:])
     
     func flowOut() throws -> RecyclableHandle {
         if let handle = Self.threadedHandles.value[path] {
@@ -104,6 +105,39 @@ public final class SQLiteDatabase {
     
 }
 
+private extension SQLiteDatabase {
+    var isInTransactionOnCurrentThread: Bool {
+        (Self.threadedTransactionDepths.value[path] ?? 0) > 0
+    }
+
+    func withWriteLock<T>(_ body: () throws -> T) throws -> T {
+        if isInTransactionOnCurrentThread {
+            return try body()
+        }
+
+        handlePool.wLock()
+        defer { handlePool.wUnlock() }
+        return try body()
+    }
+
+    func incrementTransactionDepth() {
+        var depths = Self.threadedTransactionDepths.value
+        depths[path, default: 0] += 1
+        Self.threadedTransactionDepths.value = depths
+    }
+
+    func decrementTransactionDepth() {
+        var depths = Self.threadedTransactionDepths.value
+        let nextDepth = (depths[path] ?? 0) - 1
+        if nextDepth > 0 {
+            depths[path] = nextDepth
+        } else {
+            depths.removeValue(forKey: path)
+        }
+        Self.threadedTransactionDepths.value = depths
+    }
+}
+
 // MARK: - Base Operations
 extension SQLiteDatabase {
     
@@ -126,10 +160,16 @@ extension SQLiteDatabase {
     
     // write: CREATE TABLE, DELETE, ALTER; INSERT, UPDATE, REPLACE
     public func execute(sql: String, isWrite: Bool) throws {
-        if isWrite { handlePool.wLock() }
-        defer { if isWrite { handlePool.wUnlock() } }
-        let recyclableHandle = try flowOut()
-        try recyclableHandle.rawValue.execute(sql: sql)
+        let body = { [self] in
+            let recyclableHandle = try self.flowOut()
+            try recyclableHandle.rawValue.execute(sql: sql)
+        }
+
+        if isWrite {
+            try withWriteLock(body)
+        } else {
+            try body()
+        }
     }
     
     public func begin(_ transaction: SQLiteTransaction) throws {
@@ -190,29 +230,116 @@ extension SQLiteDatabase {
 
 // MARK: - Convenience Operations
 extension SQLiteDatabase {
-    /// write multi
-    public func executeUpdatesInTransaction(_ transaction: SQLiteTransaction = .immediate, statement: String, doUpdatings: (_ stmt: borrowing SQLiteStmt) throws -> Void) throws {
+    @discardableResult
+    public func execute(_ sql: String) throws -> Int {
+        try withWriteLock {
+            let recyclableHandle = try flowOut()
+            try recyclableHandle.rawValue.execute(sql: sql)
+            return recyclableHandle.rawValue.changes()
+        }
+    }
+
+    @discardableResult
+    public func update(_ statement: String, parameters: [SQLiteValue] = []) throws -> Int {
+        try withWriteLock {
+            var stat = try prepare(statement: statement)
+            defer { try? stat.finalize() }
+
+            try stat.bind(parameters)
+            let result = try stat.step()
+            guard result == SQLITE_DONE else {
+                throw SQLiteError(code: SQLITE_MISUSE, description: "Use query APIs for statements that return rows.")
+            }
+            return try changes()
+        }
+    }
+
+    public func query<T>(_ statement: String, parameters: [SQLiteValue] = [], map: (SQLiteRow) throws -> T) throws -> [T] {
+        var rows: [T] = []
+        try query(statement, parameters: parameters) { row in
+            rows.append(try map(row))
+        }
+        return rows
+    }
+
+    public func query(_ statement: String, parameters: [SQLiteValue] = [], handleRow: (SQLiteRow) throws -> Void) throws {
+        var stat = try prepare(statement: statement)
+        defer { try? stat.finalize() }
+
+        try stat.bind(parameters)
+        var result = try stat.step()
+        while result == SQLITE_ROW {
+            try handleRow(try SQLiteRow(statement: stat))
+            result = try stat.step()
+        }
+    }
+
+    public func firstRow(_ statement: String, parameters: [SQLiteValue] = []) throws -> SQLiteRow? {
+        var stat = try prepare(statement: statement)
+        defer { try? stat.finalize() }
+
+        try stat.bind(parameters)
+        guard try stat.step() == SQLITE_ROW else {
+            return nil
+        }
+        return try SQLiteRow(statement: stat)
+    }
+
+    public func scalar(_ statement: String, parameters: [SQLiteValue] = []) throws -> SQLiteValue? {
+        try firstRow(statement, parameters: parameters)?[0]
+    }
+
+    public func transaction<T>(_ mode: SQLiteTransaction = .immediate, _ body: () throws -> T) throws -> T {
+        guard !isInTransactionOnCurrentThread else {
+            throw SQLiteError(code: SQLITE_MISUSE, description: "Nested transactions are not supported.")
+        }
+
         handlePool.wLock()
         defer { handlePool.wUnlock() }
-        
-        let stat = try prepare(statement: statement)
+
+        try begin(mode)
+        incrementTransactionDepth()
         do {
-            try begin(transaction)
-            try doUpdatings(stat)
+            let result = try body()
             try commit()
+            decrementTransactionDepth()
+            return result
         } catch {
             try? rollback()
+            decrementTransactionDepth()
+            throw error
+        }
+    }
+
+    /// write multi
+    public func executeUpdatesInTransaction(_ transaction: SQLiteTransaction = .immediate, statement: String, doUpdatings: (_ stmt: borrowing SQLiteStmt) throws -> Void) throws {
+        guard !isInTransactionOnCurrentThread else {
+            throw SQLiteError(code: SQLITE_MISUSE, description: "Nested transactions are not supported.")
+        }
+
+        try withWriteLock {
+            let stat = try prepare(statement: statement)
+            do {
+                try begin(transaction)
+                incrementTransactionDepth()
+                try doUpdatings(stat)
+                try commit()
+                decrementTransactionDepth()
+            } catch {
+                try? rollback()
+                decrementTransactionDepth()
+                throw error
+            }
         }
     }
     
     /// write single
     public func executeUpdate(statement: String, doUpdating: (borrowing SQLiteStmt) throws -> Void) throws {
-        handlePool.wLock()
-        defer { handlePool.wUnlock() }
-        
-        let stat = try prepare(statement: statement)
-        try doUpdating(stat)
-        try stat.step()
+        try withWriteLock {
+            let stat = try prepare(statement: statement)
+            try doUpdating(stat)
+            try stat.step()
+        }
     }
     
     /// read
@@ -228,4 +355,3 @@ extension SQLiteDatabase {
         }
     }
 }
-

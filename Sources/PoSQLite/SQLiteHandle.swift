@@ -33,13 +33,15 @@ public final class SQLiteHandle {
     }
     
     public func open() throws {
-        let directory = URL(fileURLWithPath: path).deletingLastPathComponent().path
-        try File.createDirectoryWithIntermediateDirectories(atPath: directory)
+        if path != ":memory:" {
+            let directory = URL(fileURLWithPath: path).deletingLastPathComponent().path
+            try File.createDirectoryWithIntermediateDirectories(atPath: directory)
+        }
         
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_SHAREDCACHE
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX
         let res = sqlite3_open_v2(path, &handle, flags, nil)
         if res != SQLITE_OK {
-            throw SQLiteError(code: res, description: String(cString: sqlite3_errmsg(handle)))
+            throw SQLiteError(code: res, description: Self.errorMessage(database: handle, fallback: "sqlite3_open_v2 failed."))
         } else {
             try execute(sql: "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA wal_autocheckpoint=5000;PRAGMA mmap_size=268435456;PRAGMA busy_timeout=3000;")
         }
@@ -66,7 +68,7 @@ public final class SQLiteHandle {
                         stmtFinalized = true
                     }
                 } else if res != SQLITE_OK {
-                    throw SQLiteError(code: res, description: String(cString: sqlite3_errmsg(handle)))
+                    throw SQLiteError(code: res, description: Self.errorMessage(database: handle, fallback: "sqlite3_close_v2 failed."))
                 }
             } while retry
             
@@ -82,6 +84,7 @@ public final class SQLiteHandle {
 // MARK: - Operations
 extension SQLiteHandle {
     public func prepare(statement stat: String) throws -> SQLiteStmt {
+        let handle = try requireOpenHandle()
         var statPtr = OpaquePointer(bitPattern: 0)
         /**
         参数
@@ -93,12 +96,16 @@ extension SQLiteHandle {
         */
         let res = sqlite3_prepare_v2(handle, stat, Int32(stat.utf8.count), &statPtr, nil)
         if res != SQLITE_OK {
-            throw SQLiteError(code: res, description: String(cString: sqlite3_errmsg(handle)))
+            throw SQLiteError(code: res, description: Self.errorMessage(database: handle, fallback: "sqlite3_prepare_v2 failed."))
         }
-        return SQLiteStmt(stat: statPtr!)
+        guard let statPtr else {
+            throw SQLiteError(code: SQLITE_MISUSE, description: "SQL statement is empty or contains only comments.")
+        }
+        return SQLiteStmt(stat: statPtr)
     }
     
     public func execute(sql: String) throws {
+        let handle = try requireOpenHandle()
         /**
          参数
            1.数据库全局句柄
@@ -111,7 +118,7 @@ extension SQLiteHandle {
         */
         let res = sqlite3_exec(handle, sql, nil, nil, nil)
         if res != SQLITE_OK {
-            throw SQLiteError(code: res, description: String(cString: sqlite3_errmsg(handle)))
+            throw SQLiteError(code: res, description: Self.errorMessage(database: handle, fallback: "sqlite3_exec failed."))
         }
     }
     
@@ -147,11 +154,12 @@ extension SQLiteHandle {
     /// wal checkPoint
     /// - Returns: pnLog: size of WAL log in frames  pnCkpt: total number of frames checkpointed
     public func checkPoint() throws -> (pnLog: Int32, pnCkpt: Int32) {
+        let handle = try requireOpenHandle()
         var pnLog: Int32 = 0
         var pnCkpt: Int32 = 0
         let res = sqlite3_wal_checkpoint_v2(handle, nil, SQLITE_CHECKPOINT_TRUNCATE, &pnLog, &pnCkpt)
         if res != SQLITE_OK {
-            throw SQLiteError(code: res, description: String(cString: sqlite3_errmsg(handle)))
+            throw SQLiteError(code: res, description: Self.errorMessage(database: handle, fallback: "sqlite3_wal_checkpoint_v2 failed."))
         }
         return (pnLog, pnCkpt)
     }
@@ -163,9 +171,10 @@ extension SQLiteHandle {
     
     /// default 10 * 1000
     public func configBusyTimeout(_ ms: Int) throws {
+        let handle = try requireOpenHandle()
         let res = sqlite3_busy_timeout(handle, Int32(ms))
         if res != SQLITE_OK {
-            throw SQLiteError(code: res, description: String(cString: sqlite3_errmsg(handle)))
+            throw SQLiteError(code: res, description: Self.errorMessage(database: handle, fallback: "sqlite3_busy_timeout failed."))
         }
     }
     
@@ -178,5 +187,18 @@ extension SQLiteHandle {
             return String(cString: cString)
         }
         return nil
+    }
+
+    private func requireOpenHandle(funcName: StaticString = #function) throws -> SQLite3 {
+        guard let handle else {
+            throw SQLiteError(code: SQLITE_MISUSE, description: "\(funcName): database handle is not open.")
+        }
+        return handle
+    }
+
+    private static func errorMessage(database: SQLite3?, fallback: String) -> String {
+        guard let database, let message = sqlite3_errmsg(database) else { return fallback }
+        let text = String(cString: message)
+        return text.isEmpty ? fallback : text
     }
 }

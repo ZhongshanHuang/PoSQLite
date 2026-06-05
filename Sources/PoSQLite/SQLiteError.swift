@@ -15,9 +15,14 @@ public extension SQLiteError {
     }
 }
 
-public struct SQLiteError: Error {
+public struct SQLiteError: Error, LocalizedError, CustomStringConvertible {
     public let code: Int32
     public let description: String
+
+    public var errorDescription: String? {
+        description
+    }
+
     public var localizedDescription: String {
         return description
     }
