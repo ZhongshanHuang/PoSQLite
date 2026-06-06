@@ -1,4 +1,4 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.3
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
@@ -22,13 +22,22 @@ let package = Package(
         .target(
             name: "PoSQLite",
             dependencies: ["SQLiteBridging"],
-            path: "./Sources/PoSQLite"),
+            path: "./Sources/PoSQLite",
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .strictMemorySafety()
+            ]),
         .target(
             name: "SQLiteBridging",
             dependencies: [],
             path: "./Sources/SQLiteBridging"),
         .testTarget(
             name: "PoSQLiteTests",
-            dependencies: ["PoSQLite"]),
-    ]
+            dependencies: ["PoSQLite"],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .strictMemorySafety()
+            ]),
+    ],
+    swiftLanguageModes: [.v6]
 )

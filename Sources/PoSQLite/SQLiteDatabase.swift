@@ -4,7 +4,7 @@ import UIKit
 import Foundation
 import SQLite3
 
-public final class SQLiteDatabase {
+public final class SQLiteDatabase: @unchecked Sendable {
     private let recyclableHandlePool: RecyclableHandlePool
     
     private var handlePool: SQLiteHandlePool {
@@ -38,8 +38,8 @@ public final class SQLiteDatabase {
 #endif
     }
     
-    private static var threadedHandles = ThreadLocal<[String: RecyclableHandle]>(defaultValue: [:])
-    private static var threadedTransactionDepths = ThreadLocal<[String: Int]>(defaultValue: [:])
+    private static let threadedHandles = ThreadLocal<[String: RecyclableHandle]>(defaultValue: [:])
+    private static let threadedTransactionDepths = ThreadLocal<[String: Int]>(defaultValue: [:])
     
     func flowOut() throws -> RecyclableHandle {
         if let handle = Self.threadedHandles.value[path] {
@@ -145,15 +145,15 @@ extension SQLiteDatabase {
         let recyclableHandle = try flowOut()
         var stat = try recyclableHandle.rawValue.prepare(statement: stat)
         let path = path
-        stat.onFinalize = {
+        recyclableHandle.refCount += 1
+        if recyclableHandle.refCount == 1 {
+            Self.threadedHandles.value[path] = recyclableHandle
+        }
+        stat.lease = SQLiteStatementLease {
             recyclableHandle.refCount -= 1
             if recyclableHandle.refCount == 0 {
                 Self.threadedHandles.value.removeValue(forKey: path)
             }
-        }
-        recyclableHandle.refCount += 1
-        if recyclableHandle.refCount == 1 {
-            Self.threadedHandles.value[path] = recyclableHandle
         }
         return stat
     }
@@ -183,20 +183,24 @@ extension SQLiteDatabase {
     
     public func commit() throws {
         let recyclableHandle = try flowOut()
-        try recyclableHandle.rawValue.commit()
-        recyclableHandle.refCount -= 1
-        if recyclableHandle.refCount == 0 {
-            Self.threadedHandles.value.removeValue(forKey: path)
+        defer {
+            recyclableHandle.refCount -= 1
+            if recyclableHandle.refCount == 0 {
+                Self.threadedHandles.value.removeValue(forKey: path)
+            }
         }
+        try recyclableHandle.rawValue.commit()
     }
     
     public func rollback() throws {
         let recyclableHandle = try flowOut()
-        try recyclableHandle.rawValue.rollback()
-        recyclableHandle.refCount -= 1
-        if recyclableHandle.refCount == 0 {
-            Self.threadedHandles.value.removeValue(forKey: path)
+        defer {
+            recyclableHandle.refCount -= 1
+            if recyclableHandle.refCount == 0 {
+                Self.threadedHandles.value.removeValue(forKey: path)
+            }
         }
+        try recyclableHandle.rawValue.rollback()
     }
     
     public func lastInsertRowID() throws -> Int {
@@ -248,7 +252,12 @@ extension SQLiteDatabase {
             try stat.bind(parameters)
             let result = try stat.step()
             guard result == SQLITE_DONE else {
-                throw SQLiteError(code: SQLITE_MISUSE, description: "Use query APIs for statements that return rows.")
+                throw SQLiteError(
+                    code: SQLITE_MISUSE,
+                    description: "Use query APIs for statements that return rows.",
+                    operation: "update",
+                    sql: statement
+                )
             }
             return try changes()
         }
@@ -305,8 +314,17 @@ extension SQLiteDatabase {
             decrementTransactionDepth()
             return result
         } catch {
-            try? rollback()
+            let rollbackError: (any Error)?
+            do {
+                try rollback()
+                rollbackError = nil
+            } catch {
+                rollbackError = error
+            }
             decrementTransactionDepth()
+            if let rollbackError {
+                throw SQLiteTransactionError(primaryError: error, rollbackError: rollbackError)
+            }
             throw error
         }
     }
@@ -326,8 +344,17 @@ extension SQLiteDatabase {
                 try commit()
                 decrementTransactionDepth()
             } catch {
-                try? rollback()
+                let rollbackError: (any Error)?
+                do {
+                    try rollback()
+                    rollbackError = nil
+                } catch {
+                    rollbackError = error
+                }
                 decrementTransactionDepth()
+                if let rollbackError {
+                    throw SQLiteTransactionError(primaryError: error, rollbackError: rollbackError)
+                }
                 throw error
             }
         }

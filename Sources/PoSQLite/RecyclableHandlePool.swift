@@ -3,9 +3,9 @@ import Foundation
 typealias RecyclableHandle = Recyclable<SQLiteHandlePool.HandleWrap>
 typealias RecyclableHandlePool = Recyclable<SQLiteHandlePool>
 
-final class SQLiteHandlePool {
+final class SQLiteHandlePool: @unchecked Sendable {
     
-    private final class Wrap {
+    private final class Wrap: @unchecked Sendable {
         let handlePool: SQLiteHandlePool
         var reference: Int = 0
         init(_ handlePool: SQLiteHandlePool) {
@@ -14,7 +14,7 @@ final class SQLiteHandlePool {
     }
     
     private static let spin = Spin()
-    private static var pools: [String: Wrap] = [:]
+    nonisolated(unsafe) private static var pools: [String: Wrap] = [:]
     private static let maxConcurrency = max(maxHardwareConcurrency, 64)
     private static var maxHardwareConcurrency: Int { ProcessInfo.processInfo.processorCount }
     
@@ -22,23 +22,23 @@ final class SQLiteHandlePool {
         spin.lock()
         defer { spin.unlock() }
         
-        var idx = pools.index(forKey: path)
+        var idx = unsafe pools.index(forKey: path)
         if idx == nil {
             let handlePool = SQLiteHandlePool(path: path)
-            pools[path] = Wrap(handlePool)
-            idx = pools.index(forKey: path)
+            unsafe pools[path] = Wrap(handlePool)
+            idx = unsafe pools.index(forKey: path)
         }
         
-        let node = pools[idx!]
+        let node = unsafe pools[idx!]
         node.value.reference += 1
         let path = node.key
         return RecyclableHandlePool(node.value.handlePool) {
             spin.lock()
             defer { spin.unlock() }
-            let wrap = pools[path]!
+            let wrap = unsafe pools[path]!
             wrap.reference -= 1
             if wrap.reference == 0 {
-                pools.removeValue(forKey: path)
+                unsafe pools.removeValue(forKey: path)
             }
         }
     }
@@ -152,7 +152,7 @@ final class SQLiteHandlePool {
         do {
             spin.lock()
             defer { spin.unlock() }
-            handlePools = pools.values.reduce(into: []) { $0.append($1.handlePool) }
+            handlePools = unsafe pools.values.reduce(into: []) { $0.append($1.handlePool) }
         }
         handlePools.forEach { $0.purgeFreeHandles() }
     }

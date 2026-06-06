@@ -1,7 +1,7 @@
 import Foundation
 import SQLite3
 
-private let sqliteTransient = unsafeBitCast(OpaquePointer(bitPattern: -1), to: sqlite3_destructor_type.self)
+@unsafe private let sqliteTransient = unsafe unsafeBitCast(unsafe OpaquePointer(bitPattern: -1), to: sqlite3_destructor_type.self)
 
 public enum SQLiteType: Int32 {
     case integer = 1    // SQLITE_INTEGER
@@ -11,226 +11,366 @@ public enum SQLiteType: Int32 {
     case null = 5       // SQLITE_NULL
 }
 
-public struct SQLiteStmt: ~Copyable {
-    private var stat: SQLite3Statement!
-    var onFinalize: (() -> Void)?
+@safe public struct SQLiteStmt: ~Copyable {
+    @unsafe private var stat: SQLite3Statement!
+    private let sql: String?
+    var lease: SQLiteStatementLease?
     
     deinit {
-        if self.stat != nil {
-            sqlite3_finalize(self.stat)
-            self.onFinalize?()
+        if unsafe self.stat != nil {
+            unsafe sqlite3_finalize(self.stat)
         }
     }
     
-    internal init(stat: SQLite3Statement) {
-        self.stat = stat
+    internal init(stat: SQLite3Statement, sql: String? = nil) {
+        unsafe self.stat = stat
+        self.sql = sql
     }
     
     public func reset(clearBindings: Bool = false) throws {
-        let statement = try _statement()
-        try _checkResult(sqlite3_reset(statement))
+        try _checkResult(try _reset(), operation: "reset")
         if clearBindings {
             try self.clearBindings()
         }
     }
 
     public func clearBindings() throws {
-        try _checkResult(sqlite3_clear_bindings(try _statement()))
+        try _checkResult(try _clearBindings(), operation: "clear_bindings")
     }
     
     public mutating func finalize() throws {
-        guard let statement = self.stat else { return }
-
-        let database = sqlite3_db_handle(statement)
-        let result = sqlite3_finalize(statement)
-        self.stat = nil
-
-        let onFinalize = self.onFinalize
-        self.onFinalize = nil
-        onFinalize?()
-
-        try Self._checkResult(result, database: database, fallback: "sqlite3_finalize")
+        defer { self.lease = nil }
+        try _finalize()
     }
     
     /// SQLITE_ROW 有数据，SQLITE_DONE 完成，其余的状态为失败
     @discardableResult
     public func step() throws -> Int32 {
-        let res = sqlite3_step(try _statement())
-        try _checkResult(res, isStep: true)
+        let res = try _step()
+        try _checkResult(res, isStep: true, operation: "step")
         return res
     }
     
     /* bind position */
     public func bind(position: Int, _ d: Double) throws {
-        try _checkResult(sqlite3_bind_double(try _statement(), Int32(position), d))
+        try _checkResult(try _bindDouble(position: Int32(position), d), operation: "bind", bind: .position(position))
     }
     
     public func bind(position: Int, _ i: Int32) throws {
-        try _checkResult(sqlite3_bind_int(try _statement(), Int32(position), i))
+        try _checkResult(try _bindInt32(position: Int32(position), i), operation: "bind", bind: .position(position))
     }
     
     public func bind(position: Int, _ i: Int) throws {
-        try _checkResult(sqlite3_bind_int64(try _statement(), Int32(position), Int64(i)))
+        try _checkResult(try _bindInt64(position: Int32(position), Int64(i)), operation: "bind", bind: .position(position))
     }
     
     public func bind(position: Int, _ i: Int64) throws {
-        try _checkResult(sqlite3_bind_int64(try _statement(), Int32(position), i))
+        try _checkResult(try _bindInt64(position: Int32(position), i), operation: "bind", bind: .position(position))
     }
     
     public func bind(position: Int, _ s: String) throws {
-        try _checkResult(sqlite3_bind_text(try _statement(), Int32(position), s, Int32(s.utf8.count), sqliteTransient))
+        try _checkResult(try _bindText(position: Int32(position), s), operation: "bind", bind: .position(position))
     }
     
     public func bind(position: Int, _ b: [Int8]) throws {
-        try _checkResult(sqlite3_bind_blob(try _statement(), Int32(position), b, Int32(b.count), sqliteTransient))
+        try _checkResult(try _bindBlob(position: Int32(position), bytes: b), operation: "bind", bind: .position(position))
     }
     
     public func bind(position: Int, _ b: [UInt8]) throws {
-        try _checkResult(sqlite3_bind_blob(try _statement(), Int32(position), b, Int32(b.count), sqliteTransient))
+        try _checkResult(try _bindBlob(position: Int32(position), bytes: b), operation: "bind", bind: .position(position))
+    }
+
+    @available(macOS 10.14.4, iOS 12.2, tvOS 12.2, watchOS 5.2, *)
+    public func bind(position: Int, _ bytes: Span<UInt8>) throws {
+        try _checkResult(try _bindBlob(position: Int32(position), bytes: bytes), operation: "bind", bind: .position(position))
     }
 
     public func bind(position: Int, _ data: Data) throws {
-        try data.withUnsafeBytes { buffer in
-            try _checkResult(sqlite3_bind_blob(try _statement(), Int32(position), buffer.baseAddress, Int32(data.count), sqliteTransient))
-        }
+        try _checkResult(try _bindBlob(position: Int32(position), data: data), operation: "bind", bind: .position(position))
     }
     
     public func bindZeroBlob(position: Int, count: Int) throws {
-        try _checkResult(sqlite3_bind_zeroblob(try _statement(), Int32(position), Int32(count)))
+        try _checkResult(try _bindZeroBlob(position: Int32(position), count: Int32(count)), operation: "bind", bind: .position(position))
     }
     
     public func bindNull(position: Int) throws {
-        try _checkResult(sqlite3_bind_null(try _statement(), Int32(position)))
+        try _checkResult(try _bindNull(position: Int32(position)), operation: "bind", bind: .position(position))
     }
     
     /* bind name */
     
     public func bind(name: String, _ d: Double) throws {
-        try _checkResult(sqlite3_bind_double(try _statement(), bindParameterIndex(name: name), d))
+        try _checkResult(try _bindDouble(position: bindParameterIndex(name: name), d), operation: "bind", bind: .name(name))
     }
     
     public func bind(name: String, _ i: Int32) throws {
-        try _checkResult(sqlite3_bind_int(try _statement(), bindParameterIndex(name: name), i))
+        try _checkResult(try _bindInt32(position: bindParameterIndex(name: name), i), operation: "bind", bind: .name(name))
     }
     
     public func bind(name: String, _ i: Int) throws {
-        try _checkResult(sqlite3_bind_int64(try _statement(), bindParameterIndex(name: name), Int64(i)))
+        try _checkResult(try _bindInt64(position: bindParameterIndex(name: name), Int64(i)), operation: "bind", bind: .name(name))
     }
     
     public func bind(name: String, _ i: Int64) throws {
-        try _checkResult(sqlite3_bind_int64(try _statement(), bindParameterIndex(name: name), i))
+        try _checkResult(try _bindInt64(position: bindParameterIndex(name: name), i), operation: "bind", bind: .name(name))
     }
     
     public func bind(name: String, _ s: String) throws {
-        try _checkResult(sqlite3_bind_text(try _statement(), bindParameterIndex(name: name), s, Int32(s.utf8.count), sqliteTransient))
+        try _checkResult(try _bindText(position: bindParameterIndex(name: name), s), operation: "bind", bind: .name(name))
     }
     
     public func bind(name: String, _ b: [Int8]) throws {
-        try _checkResult(sqlite3_bind_blob(try _statement(), bindParameterIndex(name: name), b, Int32(b.count), sqliteTransient))
+        try _checkResult(try _bindBlob(position: bindParameterIndex(name: name), bytes: b), operation: "bind", bind: .name(name))
     }
     
     public func bind(name: String, _ b: [UInt8]) throws {
-        try _checkResult(sqlite3_bind_blob(try _statement(), bindParameterIndex(name: name), b, Int32(b.count), sqliteTransient))
+        try _checkResult(try _bindBlob(position: bindParameterIndex(name: name), bytes: b), operation: "bind", bind: .name(name))
+    }
+
+    @available(macOS 10.14.4, iOS 12.2, tvOS 12.2, watchOS 5.2, *)
+    public func bind(name: String, _ bytes: Span<UInt8>) throws {
+        try _checkResult(try _bindBlob(position: bindParameterIndex(name: name), bytes: bytes), operation: "bind", bind: .name(name))
     }
 
     public func bind(name: String, _ data: Data) throws {
-        try data.withUnsafeBytes { buffer in
-            try _checkResult(sqlite3_bind_blob(try _statement(), bindParameterIndex(name: name), buffer.baseAddress, Int32(data.count), sqliteTransient))
-        }
+        try _checkResult(try _bindBlob(position: bindParameterIndex(name: name), data: data), operation: "bind", bind: .name(name))
     }
     
     public func bindZeroBlob(name: String, count: Int) throws {
-        try _checkResult(sqlite3_bind_zeroblob(try _statement(), bindParameterIndex(name: name), Int32(count)))
+        try _checkResult(try _bindZeroBlob(position: bindParameterIndex(name: name), count: Int32(count)), operation: "bind", bind: .name(name))
     }
     
     public func bindNull(name: String) throws {
-        try _checkResult(sqlite3_bind_null(try _statement(), bindParameterIndex(name: name)))
+        try _checkResult(try _bindNull(position: bindParameterIndex(name: name)), operation: "bind", bind: .name(name))
     }
     
     /// :name
     public func bindParameterIndex(name: String) throws -> Int32 {
-        let idx = sqlite3_bind_parameter_index(try _statement(), name)
+        let idx = try _bindParameterIndex(name: name)
         if idx == 0 {
-            throw SQLiteError(code: SQLITE_MISUSE, description: "The indicated bind parameter name was not found.")
+            throw SQLiteError(
+                code: SQLITE_MISUSE,
+                description: "The indicated bind parameter name was not found.",
+                operation: "bind_parameter_index",
+                sql: sql,
+                bind: .name(name)
+            )
         }
         return idx
     }
     
     public func columnName(position: Int) -> String {
-        guard let stat, let name = sqlite3_column_name(stat, Int32(position)) else { return "" }
-        return String(cString: name)
+        _columnName(position: Int32(position))
     }
     
     public func columnDeclaredType(position: Int) -> String {
-        guard let stat, let type = sqlite3_column_decltype(stat, Int32(position)) else { return "" }
-        return String(cString: type)
+        _columnDeclaredType(position: Int32(position))
     }
     
     public func columnType(position: Int) -> SQLiteType {
-        guard let stat else { return .null }
-        let res = sqlite3_column_type(stat, Int32(position))
+        let res = _columnType(position: Int32(position))
         return SQLiteType(rawValue: res) ?? .null
     }
     
     public func columnCount() -> Int {
-        guard let stat else { return 0 }
-        let res = sqlite3_column_count(stat)
-        return Int(res)
+        Int(_columnCount())
     }
     
     public func columnIntBlob<I: BinaryInteger>(position: Int) -> [I] {
-        guard let stat else { return [] }
-        let byteCount = Int(sqlite3_column_bytes(stat, Int32(position)))
-        guard byteCount > 0, let bytes = sqlite3_column_blob(stat, Int32(position)) else { return [] }
-
-        let elementStride = MemoryLayout<I>.stride
-        let elementCount = byteCount / elementStride
-        let buffer = UnsafeRawBufferPointer(start: bytes, count: byteCount)
-
-        var ret: [I] = []
-        ret.reserveCapacity(elementCount)
-        for index in 0..<elementCount {
-            ret.append(buffer.loadUnaligned(fromByteOffset: index * elementStride, as: I.self))
-        }
-        return ret
+        _columnIntBlob(position: Int32(position))
     }
 
     public func columnBlob(position: Int) -> [UInt8] {
-        guard let stat else { return [] }
-        let byteCount = Int(sqlite3_column_bytes(stat, Int32(position)))
-        guard byteCount > 0, let bytes = sqlite3_column_blob(stat, Int32(position)) else { return [] }
-        let buffer = UnsafeRawBufferPointer(start: bytes, count: byteCount)
-        return Array(buffer)
+        _columnBlob(position: Int32(position))
+    }
+
+    @available(macOS 10.14.4, iOS 12.2, tvOS 12.2, watchOS 5.2, *)
+    public func withColumnBlob<R>(position: Int, _ body: (Span<UInt8>) throws -> R) rethrows -> R {
+        try _withColumnBlob(position: Int32(position), body)
     }
     
     public func columnText(position: Int) -> String {
-        guard let stat, let text = sqlite3_column_text(stat, Int32(position)) else { return "" }
-        let byteCount = Int(sqlite3_column_bytes(stat, Int32(position)))
-        let buffer = UnsafeRawBufferPointer(start: text, count: byteCount)
-        return String(decoding: buffer, as: UTF8.self)
+        _columnText(position: Int32(position))
     }
     
     public func columnDouble(position: Int) -> Double {
-        guard let stat else { return 0 }
-        return sqlite3_column_double(stat, Int32(position))
+        _columnDouble(position: Int32(position))
     }
     
     public func columnInt32(position: Int) -> Int32 {
-        guard let stat else { return 0 }
-        return sqlite3_column_int(stat, Int32(position))
+        _columnInt32(position: Int32(position))
     }
 
     public func columnInt64(position: Int) -> Int64 {
-        guard let stat else { return 0 }
-        return sqlite3_column_int64(stat, Int32(position))
+        _columnInt64(position: Int32(position))
     }
     
     public func columnInt(position: Int) -> Int {
-        guard let stat else { return 0 }
-        return Int(sqlite3_column_int64(stat, Int32(position)))
+        Int(_columnInt64(position: Int32(position)))
     }
-    
-    private func _checkResult(_ res: Int32, isStep: Bool = false, funcName: StaticString = #function) throws {
+
+    private func _reset() throws -> Int32 {
+        unsafe sqlite3_reset(try _statement())
+    }
+
+    private func _clearBindings() throws -> Int32 {
+        unsafe sqlite3_clear_bindings(try _statement())
+    }
+
+    private mutating func _finalize() throws {
+        guard let statement = unsafe self.stat else { return }
+
+        let database = unsafe sqlite3_db_handle(statement)
+        let result = unsafe sqlite3_finalize(statement)
+        unsafe self.stat = nil
+
+        try unsafe Self._checkResult(result, database: database, fallback: "sqlite3_finalize", operation: "finalize", sql: sql)
+    }
+
+    private func _step() throws -> Int32 {
+        unsafe sqlite3_step(try _statement())
+    }
+
+    private func _bindDouble(position: Int32, _ value: Double) throws -> Int32 {
+        unsafe sqlite3_bind_double(try _statement(), position, value)
+    }
+
+    private func _bindInt32(position: Int32, _ value: Int32) throws -> Int32 {
+        unsafe sqlite3_bind_int(try _statement(), position, value)
+    }
+
+    private func _bindInt64(position: Int32, _ value: Int64) throws -> Int32 {
+        unsafe sqlite3_bind_int64(try _statement(), position, value)
+    }
+
+    private func _bindText(position: Int32, _ value: String) throws -> Int32 {
+        unsafe sqlite3_bind_text(try _statement(), position, value, Int32(value.utf8.count), sqliteTransient)
+    }
+
+    private func _bindBlob(position: Int32, bytes: [Int8]) throws -> Int32 {
+        unsafe sqlite3_bind_blob(try _statement(), position, bytes, Int32(bytes.count), sqliteTransient)
+    }
+
+    private func _bindBlob(position: Int32, bytes: [UInt8]) throws -> Int32 {
+        unsafe sqlite3_bind_blob(try _statement(), position, bytes, Int32(bytes.count), sqliteTransient)
+    }
+
+    @available(macOS 10.14.4, iOS 12.2, tvOS 12.2, watchOS 5.2, *)
+    private func _bindBlob(position: Int32, bytes: Span<UInt8>) throws -> Int32 {
+        try unsafe bytes.withUnsafeBufferPointer { buffer in
+            unsafe sqlite3_bind_blob(try _statement(), position, buffer.baseAddress, Int32(buffer.count), sqliteTransient)
+        }
+    }
+
+    private func _bindBlob(position: Int32, data: Data) throws -> Int32 {
+        try unsafe data.withUnsafeBytes { buffer in
+            unsafe sqlite3_bind_blob(try _statement(), position, buffer.baseAddress, Int32(buffer.count), sqliteTransient)
+        }
+    }
+
+    private func _bindZeroBlob(position: Int32, count: Int32) throws -> Int32 {
+        unsafe sqlite3_bind_zeroblob(try _statement(), position, count)
+    }
+
+    private func _bindNull(position: Int32) throws -> Int32 {
+        unsafe sqlite3_bind_null(try _statement(), position)
+    }
+
+    private func _bindParameterIndex(name: String) throws -> Int32 {
+        unsafe sqlite3_bind_parameter_index(try _statement(), name)
+    }
+
+    private func _columnName(position: Int32) -> String {
+        guard let stat = unsafe stat, let name = unsafe sqlite3_column_name(stat, position) else { return "" }
+        return unsafe String(cString: name)
+    }
+
+    private func _columnDeclaredType(position: Int32) -> String {
+        guard let stat = unsafe stat, let type = unsafe sqlite3_column_decltype(stat, position) else { return "" }
+        return unsafe String(cString: type)
+    }
+
+    private func _columnType(position: Int32) -> Int32 {
+        guard let stat = unsafe stat else { return SQLITE_NULL }
+        return unsafe sqlite3_column_type(stat, position)
+    }
+
+    private func _columnCount() -> Int32 {
+        guard let stat = unsafe stat else { return 0 }
+        return unsafe sqlite3_column_count(stat)
+    }
+
+    private func _columnIntBlob<I: BinaryInteger>(position: Int32) -> [I] {
+        guard let stat = unsafe stat else { return [] }
+        let byteCount = unsafe Int(sqlite3_column_bytes(stat, position))
+        guard byteCount > 0, let bytes = unsafe sqlite3_column_blob(stat, position) else { return [] }
+
+        let elementStride = MemoryLayout<I>.stride
+        let elementCount = byteCount / elementStride
+        let buffer = unsafe UnsafeRawBufferPointer(start: bytes, count: byteCount)
+
+        var values: [I] = []
+        values.reserveCapacity(elementCount)
+        for index in 0..<elementCount {
+            values.append(unsafe buffer.loadUnaligned(fromByteOffset: index * elementStride, as: I.self))
+        }
+        return values
+    }
+
+    private func _columnBlob(position: Int32) -> [UInt8] {
+        guard let stat = unsafe stat else { return [] }
+        let byteCount = unsafe Int(sqlite3_column_bytes(stat, position))
+        guard byteCount > 0, let bytes = unsafe sqlite3_column_blob(stat, position) else { return [] }
+        let buffer = unsafe UnsafeRawBufferPointer(start: bytes, count: byteCount)
+        return unsafe Array(buffer)
+    }
+
+    @available(macOS 10.14.4, iOS 12.2, tvOS 12.2, watchOS 5.2, *)
+    private func _withColumnBlob<R>(position: Int32, _ body: (Span<UInt8>) throws -> R) rethrows -> R {
+        guard let stat = unsafe stat else {
+            return try unsafe [UInt8]().withUnsafeBufferPointer {
+                try body(unsafe Span(_unsafeElements: $0))
+            }
+        }
+        let byteCount = unsafe Int(sqlite3_column_bytes(stat, position))
+        guard byteCount > 0, let bytes = unsafe sqlite3_column_blob(stat, position) else {
+            return try unsafe [UInt8]().withUnsafeBufferPointer {
+                try body(unsafe Span(_unsafeElements: $0))
+            }
+        }
+        let buffer = unsafe UnsafeBufferPointer(start: bytes.assumingMemoryBound(to: UInt8.self), count: byteCount)
+        return try body(unsafe Span(_unsafeElements: buffer))
+    }
+
+    private func _columnText(position: Int32) -> String {
+        guard let stat = unsafe stat, let text = unsafe sqlite3_column_text(stat, position) else { return "" }
+        let byteCount = unsafe Int(sqlite3_column_bytes(stat, position))
+        let buffer = unsafe UnsafeRawBufferPointer(start: text, count: byteCount)
+        return unsafe String(decoding: buffer, as: UTF8.self)
+    }
+
+    private func _columnDouble(position: Int32) -> Double {
+        guard let stat = unsafe stat else { return 0 }
+        return unsafe sqlite3_column_double(stat, position)
+    }
+
+    private func _columnInt32(position: Int32) -> Int32 {
+        guard let stat = unsafe stat else { return 0 }
+        return unsafe sqlite3_column_int(stat, position)
+    }
+
+    private func _columnInt64(position: Int32) -> Int64 {
+        guard let stat = unsafe stat else { return 0 }
+        return unsafe sqlite3_column_int64(stat, position)
+    }
+
+    private func _checkResult(
+        _ res: Int32,
+        isStep: Bool = false,
+        operation: String? = nil,
+        bind: SQLiteError.BindContext? = nil,
+        funcName: StaticString = #function
+    ) throws {
         var shouldThrow = false
         if isStep {
             shouldThrow = res != SQLITE_ROW && res != SQLITE_DONE
@@ -238,28 +378,54 @@ public struct SQLiteStmt: ~Copyable {
             shouldThrow = res != SQLITE_OK
         }
         if shouldThrow {
-            let database = self.stat.flatMap { sqlite3_db_handle($0) }
-            try Self._checkResult(res, database: database, fallback: funcName.description)
+            let database = unsafe self.stat.flatMap { unsafe sqlite3_db_handle($0) }
+            try unsafe Self._checkResult(
+                res,
+                database: database,
+                fallback: funcName.description,
+                operation: operation ?? funcName.description,
+                sql: sql,
+                bind: bind
+            )
         }
     }
 
     private func _statement(funcName: StaticString = #function) throws -> SQLite3Statement {
-        guard let stat else {
+        guard let stat = unsafe stat else {
             throw SQLiteError(code: SQLITE_MISUSE, description: "\(funcName): statement has already been finalized.")
         }
-        return stat
+        return unsafe stat
     }
 
-    private static func _checkResult(_ res: Int32, database: SQLite3?, fallback: String) throws {
+    private static func _checkResult(
+        _ res: Int32,
+        database: SQLite3?,
+        fallback: String,
+        operation: String? = nil,
+        sql: String? = nil,
+        bind: SQLiteError.BindContext? = nil
+    ) throws {
         guard res != SQLITE_OK else { return }
 
         let message: String
-        if let database, let cMessage = sqlite3_errmsg(database) {
-            message = String(cString: cMessage)
+        if let database = unsafe database, let cMessage = unsafe sqlite3_errmsg(database) {
+            message = unsafe String(cString: cMessage)
         } else {
             message = fallback
         }
-        throw SQLiteError(code: res, description: message.isEmpty ? fallback : message)
+        throw SQLiteError(
+            code: res,
+            extendedCode: unsafe _extendedCode(database: database),
+            description: message.isEmpty ? fallback : message,
+            operation: operation,
+            sql: sql,
+            bind: bind
+        )
+    }
+
+    private static func _extendedCode(database: SQLite3?) -> Int32? {
+        guard let database = unsafe database else { return nil }
+        return unsafe sqlite3_extended_errcode(database)
     }
 
 }
