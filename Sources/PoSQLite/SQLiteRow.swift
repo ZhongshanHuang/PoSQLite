@@ -93,6 +93,40 @@ public struct SQLiteRow: Equatable, Sendable {
     public func blob(named name: String) throws -> [UInt8]? {
         try blob(from: value(named: name), column: name)
     }
+
+    public func data(at position: Int) throws -> Data? {
+        try data(from: value(at: position), column: "\(position)")
+    }
+
+    public func data(named name: String) throws -> Data? {
+        try data(from: value(named: name), column: name)
+    }
+
+    public func get<T: SQLiteValueDecodable>(_ position: Int, as type: T.Type = T.self) throws -> T? {
+        try T.decodeSQLiteValue(value(at: position), column: "\(position)")
+    }
+
+    public func get<T: SQLiteValueDecodable>(_ name: String, as type: T.Type = T.self) throws -> T? {
+        try T.decodeSQLiteValue(value(named: name), column: name)
+    }
+
+    public func require<T: SQLiteValueDecodable>(_ position: Int, as type: T.Type = T.self) throws -> T {
+        guard let value: T = try get(position, as: type) else {
+            throw nullValue(column: "\(position)")
+        }
+        return value
+    }
+
+    public func require<T: SQLiteValueDecodable>(_ name: String, as type: T.Type = T.self) throws -> T {
+        guard let value: T = try get(name, as: type) else {
+            throw nullValue(column: name)
+        }
+        return value
+    }
+}
+
+public protocol SQLiteValueDecodable {
+    static func decodeSQLiteValue(_ value: SQLiteValue, column: String) throws -> Self?
 }
 
 extension SQLiteRow {
@@ -190,10 +224,22 @@ private extension SQLiteRow {
         }
     }
 
+    func data(from value: SQLiteValue, column: String) throws -> Data? {
+        guard let bytes = try blob(from: value, column: column) else { return nil }
+        return Data(bytes)
+    }
+
     func mismatch(column: String, expected: String, actual: SQLiteValue) -> SQLiteError {
         SQLiteError(
             code: SQLITE_MISMATCH,
             description: "Column '\(column)' expected \(expected), got \(actual.storageDescription)."
+        )
+    }
+
+    func nullValue(column: String) -> SQLiteError {
+        SQLiteError(
+            code: SQLITE_MISMATCH,
+            description: "Column '\(column)' is NULL."
         )
     }
 }
@@ -212,5 +258,104 @@ private extension SQLiteValue {
         case .blob:
             return "BLOB"
         }
+    }
+}
+
+extension SQLiteValue: SQLiteValueDecodable {
+    public static func decodeSQLiteValue(_ value: SQLiteValue, column: String) throws -> SQLiteValue? {
+        value
+    }
+}
+
+extension String: SQLiteValueDecodable {
+    public static func decodeSQLiteValue(_ value: SQLiteValue, column: String) throws -> String? {
+        switch value {
+        case .null:
+            return nil
+        case .text(let value):
+            return value
+        default:
+            throw SQLiteRow.typeMismatch(column: column, expected: "TEXT", actual: value)
+        }
+    }
+}
+
+extension Int64: SQLiteValueDecodable {
+    public static func decodeSQLiteValue(_ value: SQLiteValue, column: String) throws -> Int64? {
+        switch value {
+        case .null:
+            return nil
+        case .integer(let value):
+            return value
+        default:
+            throw SQLiteRow.typeMismatch(column: column, expected: "INTEGER", actual: value)
+        }
+    }
+}
+
+extension Int: SQLiteValueDecodable {
+    public static func decodeSQLiteValue(_ value: SQLiteValue, column: String) throws -> Int? {
+        guard let value = try Int64.decodeSQLiteValue(value, column: column) else { return nil }
+        guard value >= Int64(Int.min), value <= Int64(Int.max) else {
+            throw SQLiteError(code: SQLITE_RANGE, description: "Column '\(column)' integer value is out of Int range.")
+        }
+        return Int(value)
+    }
+}
+
+extension Double: SQLiteValueDecodable {
+    public static func decodeSQLiteValue(_ value: SQLiteValue, column: String) throws -> Double? {
+        switch value {
+        case .null:
+            return nil
+        case .double(let value):
+            return value
+        case .integer(let value):
+            return Double(value)
+        default:
+            throw SQLiteRow.typeMismatch(column: column, expected: "REAL", actual: value)
+        }
+    }
+}
+
+extension Bool: SQLiteValueDecodable {
+    public static func decodeSQLiteValue(_ value: SQLiteValue, column: String) throws -> Bool? {
+        switch value {
+        case .null:
+            return nil
+        case .integer(let value):
+            return value != 0
+        default:
+            throw SQLiteRow.typeMismatch(column: column, expected: "INTEGER boolean", actual: value)
+        }
+    }
+}
+
+extension Array: SQLiteValueDecodable where Element == UInt8 {
+    public static func decodeSQLiteValue(_ value: SQLiteValue, column: String) throws -> [UInt8]? {
+        switch value {
+        case .null:
+            return nil
+        case .blob(let value):
+            return value
+        default:
+            throw SQLiteRow.typeMismatch(column: column, expected: "BLOB", actual: value)
+        }
+    }
+}
+
+extension Data: SQLiteValueDecodable {
+    public static func decodeSQLiteValue(_ value: SQLiteValue, column: String) throws -> Data? {
+        guard let bytes = try [UInt8].decodeSQLiteValue(value, column: column) else { return nil }
+        return Data(bytes)
+    }
+}
+
+private extension SQLiteRow {
+    static func typeMismatch(column: String, expected: String, actual: SQLiteValue) -> SQLiteError {
+        SQLiteError(
+            code: SQLITE_MISMATCH,
+            description: "Column '\(column)' expected \(expected), got \(actual.storageDescription)."
+        )
     }
 }

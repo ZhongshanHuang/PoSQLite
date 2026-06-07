@@ -14,13 +14,25 @@ public final class SQLiteDatabase: @unchecked Sendable {
     public var path: String {
         handlePool.path
     }
-    
-    public convenience init(path: String) {
-        self.init(fileURL: URL(fileURLWithPath: path))
+
+    public var configuration: SQLiteConfiguration {
+        handlePool.configuration
     }
     
-    public init(fileURL: URL) {
-        self.recyclableHandlePool = SQLiteHandlePool.getHandlePool(with: fileURL.standardizedFileURL.path)
+    private var identity: SQLiteHandlePool.Key {
+        handlePool.key
+    }
+    
+    public convenience init(path: String, configuration: SQLiteConfiguration = .mobile) {
+        self.init(resolvedPath: Self.resolvePath(path, configuration: configuration), configuration: configuration)
+    }
+    
+    public convenience init(fileURL: URL, configuration: SQLiteConfiguration = .mobile) {
+        self.init(resolvedPath: fileURL.standardizedFileURL.path, configuration: configuration)
+    }
+
+    private init(resolvedPath path: String, configuration: SQLiteConfiguration) {
+        self.recyclableHandlePool = SQLiteHandlePool.getHandlePool(with: path, configuration: configuration)
 
 #if canImport(UIKit)
         DispatchQueue.once(name: "com.potato.sqlite.swift.purge", {
@@ -38,11 +50,11 @@ public final class SQLiteDatabase: @unchecked Sendable {
 #endif
     }
     
-    private static let threadedHandles = ThreadLocal<[String: RecyclableHandle]>(defaultValue: [:])
-    private static let threadedTransactionDepths = ThreadLocal<[String: Int]>(defaultValue: [:])
+    private static let threadedHandles = ThreadLocal<[SQLiteHandlePool.Key: RecyclableHandle]>(defaultValue: [:])
+    private static let threadedTransactionDepths = ThreadLocal<[SQLiteHandlePool.Key: Int]>(defaultValue: [:])
     
     func flowOut() throws -> RecyclableHandle {
-        if let handle = Self.threadedHandles.value[path] {
+        if let handle = Self.threadedHandles.value[identity] {
             return handle
         }
         let handle = try handlePool.flowOut()
@@ -54,12 +66,12 @@ public final class SQLiteDatabase: @unchecked Sendable {
     /// So you can call this to check whether the database can be opened.
     /// Return false if an error occurs during sqlite handle initialization.
     public var canOpen: Bool {
-        return !handlePool.isDrained || ((try? handlePool.fillOne()) != nil)
+        return !handlePool.isClosed && (!handlePool.isDrained || ((try? handlePool.fillOne()) != nil))
     }
 
     /// Check database is already opened.
     public var isOpened: Bool {
-        return !handlePool.isDrained
+        return !handlePool.isClosed && !handlePool.isDrained
     }
 
     /// Check whether database is blockaded.
@@ -69,13 +81,20 @@ public final class SQLiteDatabase: @unchecked Sendable {
     
     public typealias OnClosed = () throws -> Void
     
-    public func close(onClosed: OnClosed) rethrows {
-        try handlePool.drain(onDrained: onClosed)
+    public func close(onClosed: OnClosed) throws {
+        if Self.threadedHandles.value[identity] != nil {
+            throw SQLiteError(
+                code: SQLITE_BUSY,
+                description: "Cannot close database while the current thread holds active statements or a transaction.",
+                operation: "close"
+            )
+        }
+        try handlePool.close(onClosed: onClosed)
     }
 
     /// Close the database.
-    public func close() {
-        handlePool.drain()
+    public func close() throws {
+        try close(onClosed: {})
     }
 
     /// Blockade the database.
@@ -90,8 +109,8 @@ public final class SQLiteDatabase: @unchecked Sendable {
 
     /// Purge all unused memory of this database.
     /// It will cache and reuse some sqlite handles to improve performance.
-    /// The max count of free sqlite handles is same
-    /// as the number of concurrent threads supported by the hardware implementation.
+    /// The max count of free sqlite handles is controlled by
+    /// `SQLiteConfiguration.maximumIdleConnectionCount`.
     /// You can call it to save some memory.
     public func purge() {
         handlePool.purgeFreeHandles()
@@ -107,7 +126,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
 
 private extension SQLiteDatabase {
     var isInTransactionOnCurrentThread: Bool {
-        (Self.threadedTransactionDepths.value[path] ?? 0) > 0
+        (Self.threadedTransactionDepths.value[identity] ?? 0) > 0
     }
 
     func withWriteLock<T>(_ body: () throws -> T) throws -> T {
@@ -122,19 +141,26 @@ private extension SQLiteDatabase {
 
     func incrementTransactionDepth() {
         var depths = Self.threadedTransactionDepths.value
-        depths[path, default: 0] += 1
+        depths[identity, default: 0] += 1
         Self.threadedTransactionDepths.value = depths
     }
 
     func decrementTransactionDepth() {
         var depths = Self.threadedTransactionDepths.value
-        let nextDepth = (depths[path] ?? 0) - 1
+        let nextDepth = (depths[identity] ?? 0) - 1
         if nextDepth > 0 {
-            depths[path] = nextDepth
+            depths[identity] = nextDepth
         } else {
-            depths.removeValue(forKey: path)
+            depths.removeValue(forKey: identity)
         }
         Self.threadedTransactionDepths.value = depths
+    }
+
+    static func resolvePath(_ path: String, configuration: SQLiteConfiguration) -> String {
+        if path == ":memory:" || configuration.usesURI {
+            return path
+        }
+        return URL(fileURLWithPath: path).standardizedFileURL.path
     }
 }
 
@@ -144,15 +170,15 @@ extension SQLiteDatabase {
     public func prepare(statement stat: String) throws -> SQLiteStmt {
         let recyclableHandle = try flowOut()
         var stat = try recyclableHandle.rawValue.prepare(statement: stat)
-        let path = path
+        let identity = identity
         recyclableHandle.refCount += 1
         if recyclableHandle.refCount == 1 {
-            Self.threadedHandles.value[path] = recyclableHandle
+            Self.threadedHandles.value[identity] = recyclableHandle
         }
         stat.lease = SQLiteStatementLease {
             recyclableHandle.refCount -= 1
             if recyclableHandle.refCount == 0 {
-                Self.threadedHandles.value.removeValue(forKey: path)
+                Self.threadedHandles.value.removeValue(forKey: identity)
             }
         }
         return stat
@@ -177,7 +203,7 @@ extension SQLiteDatabase {
         try recyclableHandle.rawValue.begin(transaction)
         recyclableHandle.refCount += 1
         if recyclableHandle.refCount == 1 {
-            Self.threadedHandles.value[path] = recyclableHandle
+            Self.threadedHandles.value[identity] = recyclableHandle
         }
     }
     
@@ -186,7 +212,7 @@ extension SQLiteDatabase {
         defer {
             recyclableHandle.refCount -= 1
             if recyclableHandle.refCount == 0 {
-                Self.threadedHandles.value.removeValue(forKey: path)
+                Self.threadedHandles.value.removeValue(forKey: identity)
             }
         }
         try recyclableHandle.rawValue.commit()
@@ -197,7 +223,7 @@ extension SQLiteDatabase {
         defer {
             recyclableHandle.refCount -= 1
             if recyclableHandle.refCount == 0 {
-                Self.threadedHandles.value.removeValue(forKey: path)
+                Self.threadedHandles.value.removeValue(forKey: identity)
             }
         }
         try recyclableHandle.rawValue.rollback()
@@ -298,7 +324,80 @@ extension SQLiteDatabase {
         try firstRow(statement, parameters: parameters)?[0]
     }
 
+    @discardableResult
+    public func run(_ sql: SQL) throws -> SQLiteRunResult {
+        try withWriteLock {
+            var statement = try prepare(statement: sql.statement)
+            defer { try? statement.finalize() }
+
+            try statement.bind(sql.parameters)
+            let result = try statement.step()
+            guard result == SQLITE_DONE else {
+                throw SQLiteError(
+                    code: SQLITE_MISUSE,
+                    description: "Use fetch APIs for statements that return rows.",
+                    operation: "run",
+                    sql: sql.statement
+                )
+            }
+
+            return SQLiteRunResult(
+                changes: try changes(),
+                lastInsertRowID: try lastInsertRowID()
+            )
+        }
+    }
+
+    public func fetch<T>(_ sql: SQL, map: (SQLiteRow) throws -> T) throws -> [T] {
+        var rows: [T] = []
+        try fetch(sql) { row in
+            rows.append(try map(row))
+        }
+        return rows
+    }
+
+    public func fetch(_ sql: SQL) throws -> [SQLiteRow] {
+        try fetch(sql) { $0 }
+    }
+
+    public func fetch(_ sql: SQL, handleRow: (SQLiteRow) throws -> Void) throws {
+        var statement = try prepare(statement: sql.statement)
+        defer { try? statement.finalize() }
+
+        try statement.bind(sql.parameters)
+        var result = try statement.step()
+        while result == SQLITE_ROW {
+            try handleRow(try SQLiteRow(statement: statement))
+            result = try statement.step()
+        }
+    }
+
+    public func fetchOne(_ sql: SQL) throws -> SQLiteRow? {
+        var statement = try prepare(statement: sql.statement)
+        defer { try? statement.finalize() }
+
+        try statement.bind(sql.parameters)
+        guard try statement.step() == SQLITE_ROW else {
+            return nil
+        }
+        return try SQLiteRow(statement: statement)
+    }
+
+    public func scalar(_ sql: SQL) throws -> SQLiteValue? {
+        try fetchOne(sql)?[0]
+    }
+
     public func transaction<T>(_ mode: SQLiteTransaction = .immediate, _ body: () throws -> T) throws -> T {
+        try _transaction(mode, body)
+    }
+
+    public func transaction<T>(_ mode: SQLiteTransaction = .immediate, _ body: (_ transaction: borrowing SQLiteTransactionContext) throws -> T) throws -> T {
+        try _transaction(mode) {
+            try body(SQLiteTransactionContext(database: self))
+        }
+    }
+
+    private func _transaction<T>(_ mode: SQLiteTransaction, _ body: () throws -> T) throws -> T {
         guard !isInTransactionOnCurrentThread else {
             throw SQLiteError(code: SQLITE_MISUSE, description: "Nested transactions are not supported.")
         }

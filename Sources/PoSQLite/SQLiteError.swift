@@ -7,12 +7,6 @@ public extension SQLiteError {
         print("🔴🔔🔔🔴 \(msg)")
 #endif
     }
-    
-    static func reportSQLiteGlobal(code: Int, msg: String) {
-#if DEBUG
-        print("🔴🔔🔔🔴 SQLiteGlobal code: \(code) error: \(msg)")
-#endif
-    }
 }
 
 public struct SQLiteError: Error, LocalizedError, CustomStringConvertible, Sendable {

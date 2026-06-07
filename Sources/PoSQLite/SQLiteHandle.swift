@@ -1,6 +1,5 @@
 import Foundation
 import SQLite3
-import SQLiteBridging
 
 typealias SQLite3 = OpaquePointer
 typealias SQLite3Statement = OpaquePointer
@@ -17,23 +16,29 @@ public enum SQLiteTransaction: String {
 @safe public final class SQLiteHandle {
     @unsafe private var handle: SQLite3?
     public let path: String
-    public init(withPath path: String) {
-        Self.configureSQLiteOnce()
+    public let configuration: SQLiteConfiguration
+
+    public init(withPath path: String, configuration: SQLiteConfiguration) {
         self.path = path
+        self.configuration = configuration
     }
     
     public func open() throws {
-        if path != ":memory:" {
+        if configuration.shouldCreateContainingDirectory(for: path) {
             let directory = URL(fileURLWithPath: path).deletingLastPathComponent().path
             try File.createDirectoryWithIntermediateDirectories(atPath: directory)
         }
         
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX
-        let res = _open(flags: flags)
+        let res = _open(flags: configuration.openFlags)
         if res != SQLITE_OK {
             throw _error(code: res, fallback: "sqlite3_open_v2 failed.", operation: "open")
-        } else {
-            try execute(sql: "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA wal_autocheckpoint=5000;PRAGMA mmap_size=268435456;PRAGMA busy_timeout=3000;")
+        }
+
+        if let busyTimeoutMilliseconds = configuration.busyTimeoutMilliseconds {
+            try configBusyTimeout(busyTimeoutMilliseconds)
+        }
+        for statement in configuration.connectionPreparationStatements {
+            try execute(sql: statement)
         }
     }
     
@@ -104,17 +109,6 @@ extension SQLiteHandle {
     
     public func errMsg() -> String? {
         _errMsg()
-    }
-
-    private static func configureSQLiteOnce() {
-        DispatchQueue.once(name: "com.potato.sqlite.handle") {
-            sqlite3_config_multithread()
-            sqlite3_config_memstatus(0)
-            unsafe sqlite3_config_log({ (_, code, message) in
-                let msg = unsafe message.map { unsafe String(cString: $0) } ?? ""
-                SQLiteError.reportSQLiteGlobal(code: Int(code), msg: msg)
-            }, nil)
-        }
     }
 
     private func _open(flags: Int32) -> Int32 {

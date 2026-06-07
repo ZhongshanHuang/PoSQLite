@@ -1,9 +1,14 @@
 import Foundation
+import SQLite3
 
 typealias RecyclableHandle = Recyclable<SQLiteHandlePool.HandleWrap>
 typealias RecyclableHandlePool = Recyclable<SQLiteHandlePool>
 
 final class SQLiteHandlePool: @unchecked Sendable {
+    struct Key: Hashable, Sendable {
+        let path: String
+        let configuration: SQLiteConfiguration
+    }
     
     private final class Wrap: @unchecked Sendable {
         let handlePool: SQLiteHandlePool
@@ -14,39 +19,41 @@ final class SQLiteHandlePool: @unchecked Sendable {
     }
     
     private static let spin = Spin()
-    nonisolated(unsafe) private static var pools: [String: Wrap] = [:]
-    private static let maxConcurrency = max(maxHardwareConcurrency, 64)
+    nonisolated(unsafe) private static var pools: [Key: Wrap] = [:]
     private static var maxHardwareConcurrency: Int { ProcessInfo.processInfo.processorCount }
     
-    static func getHandlePool(with path: String) -> RecyclableHandlePool {
+    static func getHandlePool(with path: String, configuration: SQLiteConfiguration) -> RecyclableHandlePool {
+        let key = Key(path: path, configuration: configuration)
+
         spin.lock()
         defer { spin.unlock() }
         
-        var idx = unsafe pools.index(forKey: path)
-        if idx == nil {
-            let handlePool = SQLiteHandlePool(path: path)
-            unsafe pools[path] = Wrap(handlePool)
-            idx = unsafe pools.index(forKey: path)
+        let wrap: Wrap
+        if let existing = unsafe pools[key], !existing.handlePool.isClosed {
+            wrap = existing
+        } else {
+            let handlePool = SQLiteHandlePool(key: key)
+            wrap = Wrap(handlePool)
+            unsafe pools[key] = wrap
         }
         
-        let node = unsafe pools[idx!]
-        node.value.reference += 1
-        let path = node.key
-        return RecyclableHandlePool(node.value.handlePool) {
+        wrap.reference += 1
+        return RecyclableHandlePool(wrap.handlePool) {
             spin.lock()
             defer { spin.unlock() }
-            let wrap = unsafe pools[path]!
             wrap.reference -= 1
-            if wrap.reference == 0 {
-                unsafe pools.removeValue(forKey: path)
+            if wrap.reference == 0, let current = unsafe pools[key], current === wrap {
+                unsafe pools.removeValue(forKey: key)
             }
         }
     }
     
     
     typealias HandleWrap = SQLiteHandle
-    private var handles = ConcurrentList<HandleWrap>(capacity: maxHardwareConcurrency)
-    let path: String
+    private let handles: ConcurrentList<HandleWrap>
+    let key: Key
+    var path: String { key.path }
+    var configuration: SQLiteConfiguration { key.configuration }
     private let wwlock = UnfairLock()
     
     func wLock() {
@@ -58,22 +65,42 @@ final class SQLiteHandlePool: @unchecked Sendable {
     }
     
     private let rwlock = RWLock()
-    private let aliveHandleCount = Atomic<Int>(0)
+    private let stateLock = UnfairLock()
+    private var aliveHandleCount = 0
+    private var closed = false
     
-    private init(path: String) {
-        self.path = path
+    private init(key: Key) {
+        self.key = key
+        self.handles = ConcurrentList<HandleWrap>(capacity: Self.maximumIdleConnectionCount(for: key))
     }
     
     var isDrained: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         return aliveHandleCount == 0
+    }
+
+    var isClosed: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return closed
     }
     
     func fillOne() throws {
         rwlock.lockRead()
         defer { rwlock.unlockRead() }
-        let handle = try generate()
-        if handles.pushBack(handle) {
-            aliveHandleCount += 1
+        try reserveAliveHandleSlot()
+
+        let handle: HandleWrap
+        do {
+            handle = try generate()
+        } catch {
+            releaseAliveHandleSlots(1)
+            throw error
+        }
+
+        if !handles.pushBack(handle) {
+            releaseAliveHandleSlots(1)
         }
     }
     
@@ -81,32 +108,34 @@ final class SQLiteHandlePool: @unchecked Sendable {
         var unlock = true
         rwlock.lockRead()
         defer { if unlock { rwlock.unlockRead() } }
+        try throwIfClosed()
+
         var handleWrap = handles.popBack()
         if handleWrap == nil {
-            guard aliveHandleCount < SQLiteHandlePool.maxConcurrency else { throw SQLiteError(code: 0, description: "The concurrency of database exceeds the max concurrency") }
-            handleWrap = try generate()
-            aliveHandleCount += 1
-            if aliveHandleCount > SQLiteHandlePool.maxHardwareConcurrency {
-                var warning = "The concurrency of database: \(path) with \(aliveHandleCount)"
-                warning.append(" exceeds the concurrency of hardware: \(SQLiteHandlePool.maxHardwareConcurrency)")
-                SQLiteError.warning(warning)
+            try reserveAliveHandleSlot()
+            do {
+                handleWrap = try generate()
+            } catch {
+                releaseAliveHandleSlots(1)
+                throw error
             }
         }
         unlock = false
-        
-        return RecyclableHandle(handleWrap!, onRecycled: { self.flowBack(handleWrap!) })
+
+        let handle = handleWrap!
+        return RecyclableHandle(handle, onRecycled: { self.flowBack(handle) })
     }
     
     private func flowBack(_ handleWrap: HandleWrap) {
         let inserted = handles.pushBack(handleWrap)
         rwlock.unlockRead()
         if !inserted {
-            aliveHandleCount -= 1
+            releaseAliveHandleSlots(1)
         }
     }
     
     private func generate() throws -> HandleWrap {
-        let handle = SQLiteHandle(withPath: path)
+        let handle = SQLiteHandle(withPath: path, configuration: configuration)
         try handle.open()
         return handle
     }
@@ -125,26 +154,28 @@ final class SQLiteHandlePool: @unchecked Sendable {
 
     typealias OnDrained = () throws -> Void
 
-    func drain(onDrained: OnDrained) rethrows {
+    func close(onClosed: OnDrained) rethrows {
         blockade()
         defer { unblockade() }
+        markClosed()
         let size = handles.clear()
-        aliveHandleCount -= size
-        try onDrained()
+        releaseAliveHandleSlots(size)
+        try onClosed()
     }
 
-    func drain() {
+    func close() {
         blockade()
         defer { unblockade() }
+        markClosed()
         let size = handles.clear()
-        aliveHandleCount -= size
+        releaseAliveHandleSlots(size)
     }
 
     func purgeFreeHandles() {
         rwlock.lockRead()
         defer { rwlock.unlockRead() }
         let size = handles.clear()
-        aliveHandleCount -= size
+        releaseAliveHandleSlots(size)
     }
     
     static func purgeFreeHandlesInAllPools() {
@@ -157,4 +188,73 @@ final class SQLiteHandlePool: @unchecked Sendable {
         handlePools.forEach { $0.purgeFreeHandles() }
     }
 
+}
+
+private extension SQLiteHandlePool {
+    func throwIfClosed() throws {
+        stateLock.lock()
+        let isClosed = closed
+        stateLock.unlock()
+
+        if isClosed {
+            throw SQLiteError(
+                code: SQLITE_MISUSE,
+                description: "Database is closed.",
+                operation: "open_handle"
+            )
+        }
+    }
+
+    func reserveAliveHandleSlot() throws {
+        stateLock.lock()
+        if closed {
+            stateLock.unlock()
+            throw SQLiteError(
+                code: SQLITE_MISUSE,
+                description: "Database is closed.",
+                operation: "open_handle"
+            )
+        }
+
+        guard aliveHandleCount < maximumConnectionCount else {
+            stateLock.unlock()
+            throw SQLiteError(
+                code: SQLITE_BUSY,
+                description: "The database reached its configured maximum connection count: \(maximumConnectionCount).",
+                operation: "open_handle"
+            )
+        }
+
+        aliveHandleCount += 1
+        let count = aliveHandleCount
+        stateLock.unlock()
+
+        if count > SQLiteHandlePool.maxHardwareConcurrency {
+            var warning = "The concurrency of database: \(path) with \(count)"
+            warning.append(" exceeds the concurrency of hardware: \(SQLiteHandlePool.maxHardwareConcurrency)")
+            SQLiteError.warning(warning)
+        }
+    }
+
+    func releaseAliveHandleSlots(_ count: Int) {
+        guard count > 0 else { return }
+
+        stateLock.lock()
+        aliveHandleCount = max(0, aliveHandleCount - count)
+        stateLock.unlock()
+    }
+
+    func markClosed() {
+        stateLock.lock()
+        closed = true
+        stateLock.unlock()
+    }
+
+    var maximumConnectionCount: Int {
+        path == ":memory:" ? 1 : configuration.maximumConnectionCount
+    }
+
+    static func maximumIdleConnectionCount(for key: Key) -> Int {
+        key.path == ":memory:" ? 1 : key.configuration.maximumIdleConnectionCount
+    }
 }

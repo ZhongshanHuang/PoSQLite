@@ -1,52 +1,117 @@
 # PoSQLite
 
-PoSQLite is a small Swift wrapper around SQLite. It keeps the low-level statement API available, while providing safer Swift-friendly helpers for parameter binding, row mapping, and transactions.
+PoSQLite is a small Swift wrapper around SQLite. It provides safe SQL interpolation, row mapping, transactions, and a lower-level statement API when you need direct control.
 
 ## Usage
 
 ```swift
+import Foundation
 import PoSQLite
+
+struct User: SQLiteRowDecodable {
+    let id: Int
+    let name: String
+    let age: Int?
+    let avatar: Data?
+
+    init(row: SQLiteRow) throws {
+        id = try row.require("id")
+        name = try row.require("name")
+        age = try row.get("age")
+        avatar = try row.get("avatar", as: Data.self)
+    }
+}
 
 let database = SQLiteDatabase(path: "/tmp/app.sqlite")
 
-try database.execute("""
+try database.run("""
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
-    age INTEGER
+    age INTEGER,
+    avatar BLOB
 );
 """)
 
-try database.update(
-    "INSERT INTO users (name, age) VALUES (?, ?)",
-    parameters: ["Ada", 37]
-)
+let name = "Ada"
+let age = 37
+let avatar = Data([0, 1, 2])
+let result = try database.run("""
+INSERT INTO users (name, age, avatar)
+VALUES (\(name), \(age), \(avatar))
+""")
 
-let users = try database.query("SELECT id, name, age FROM users ORDER BY id") { row in
-    (
-        id: try row.int(named: "id"),
-        name: try row.string(named: "name"),
-        age: try row.int(named: "age")
-    )
+print(result.lastInsertRowID)
+
+let users = try database.fetch("SELECT id, name, age, avatar FROM users ORDER BY id", as: User.self)
+let adultCount = try database.scalar("SELECT COUNT(*) FROM users WHERE age >= \(18)", as: Int.self)
+```
+
+Interpolated values are always bound as parameters. They are not concatenated into the SQL string.
+
+```swift
+try database.run("UPDATE users SET age = \(38) WHERE name = \("Ada")")
+
+let rows = try database.fetch("SELECT id, name FROM users WHERE name = \(name)") { row in
+    (id: try row.require("id", as: Int.self), name: try row.require("name", as: String.self))
 }
 ```
 
-Use bound `SQLiteValue` parameters instead of string interpolation for user input:
+Use explicit raw SQL or quoted identifiers only for SQL syntax, not user values:
 
 ```swift
-try database.update(
-    "UPDATE users SET age = ? WHERE name = ?",
-    parameters: [38, "Ada"]
-)
+let table = "users"
+let rows = try database.fetch("SELECT \(raw: "COUNT(*)") FROM \(identifier: table)")
 ```
 
 Transactions keep all writes on the same SQLite handle and roll back on any thrown error:
 
 ```swift
-try database.transaction {
-    try database.update("INSERT INTO users (name, age) VALUES (?, ?)", parameters: ["Grace", 40])
-    try database.update("INSERT INTO users (name, age) VALUES (?, ?)", parameters: ["Linus", nil])
+try database.transaction { transaction in
+    try transaction.run("INSERT INTO users (name, age) VALUES (\("Grace"), \(40))")
+    try transaction.run("INSERT INTO users (name, age) VALUES (\("Linus"), \(nil as Int?))")
+
+    let count = try transaction.scalar("SELECT COUNT(*) FROM users", as: Int.self)
+    print(count as Any)
 }
 ```
 
-The original `prepare`, `executeUpdate`, `executeQuery`, and statement binding APIs are still available for lower-level control.
+The lower-level `prepare`, `executeUpdate`, `executeQuery`, and statement binding APIs are still available for advanced control.
+
+## Configuration
+
+`SQLiteDatabase` uses `SQLiteConfiguration.mobile` by default. The default is tuned for mobile apps:
+
+- WAL journal mode
+- `synchronous=NORMAL`
+- `foreign_keys=ON`
+- `busy_timeout=5000`
+- `temp_store=MEMORY`
+- 64 MiB mmap size
+- 8 MiB page cache target
+- 1000-page WAL autocheckpoint
+- 16 MiB journal size limit
+- capped connection pooling with a small idle handle cache
+
+Override only the parts your app needs:
+
+```swift
+let configuration = SQLiteConfiguration(
+    busyTimeoutMilliseconds: 10_000,
+    maximumConnectionCount: 4,
+    maximumIdleConnectionCount: 2,
+    additionalPragmas: [
+        "PRAGMA user_version=1;"
+    ]
+)
+
+let database = SQLiteDatabase(path: "/tmp/app.sqlite", configuration: configuration)
+```
+
+`close()` permanently closes the database pool for the same path and configuration, and throws if the current thread still holds an active statement or transaction:
+
+```swift
+try database.close()
+```
+
+Create a new `SQLiteDatabase` for the same path when you need to reopen it.

@@ -21,16 +21,12 @@ let package = Package(
         // Targets can depend on other targets in this package, and on products in packages this package depends on.
         .target(
             name: "PoSQLite",
-            dependencies: ["SQLiteBridging"],
+            dependencies: [],
             path: "./Sources/PoSQLite",
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 .strictMemorySafety()
             ]),
-        .target(
-            name: "SQLiteBridging",
-            dependencies: [],
-            path: "./Sources/SQLiteBridging"),
         .testTarget(
             name: "PoSQLiteTests",
             dependencies: ["PoSQLite"],
