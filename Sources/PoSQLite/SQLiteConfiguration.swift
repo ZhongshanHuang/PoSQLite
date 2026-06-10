@@ -49,6 +49,8 @@ public struct SQLiteConfiguration: Hashable, Sendable {
         min(max(ProcessInfo.processInfo.processorCount / 2, 2), 4)
     }
 
+    public static let defaultConnectionCheckoutTimeoutMilliseconds = 5_000
+
     public static let mobile = SQLiteConfiguration()
 
     public var accessMode: AccessMode
@@ -56,6 +58,7 @@ public struct SQLiteConfiguration: Hashable, Sendable {
     public var cacheMode: CacheMode
     public var usesURI: Bool
     public var busyTimeoutMilliseconds: Int?
+    public var connectionCheckoutTimeoutMilliseconds: Int?
     public var maximumConnectionCount: Int
     public var maximumIdleConnectionCount: Int
     public var journalMode: JournalMode?
@@ -74,6 +77,7 @@ public struct SQLiteConfiguration: Hashable, Sendable {
         cacheMode: CacheMode = .private,
         usesURI: Bool = false,
         busyTimeoutMilliseconds: Int? = 5_000,
+        connectionCheckoutTimeoutMilliseconds: Int? = SQLiteConfiguration.defaultConnectionCheckoutTimeoutMilliseconds,
         maximumConnectionCount: Int = SQLiteConfiguration.defaultMaximumConnectionCount,
         maximumIdleConnectionCount: Int = SQLiteConfiguration.defaultMaximumIdleConnectionCount,
         journalMode: JournalMode? = .wal,
@@ -92,6 +96,7 @@ public struct SQLiteConfiguration: Hashable, Sendable {
         self.cacheMode = cacheMode
         self.usesURI = usesURI
         self.busyTimeoutMilliseconds = busyTimeoutMilliseconds.map { max(0, $0) }
+        self.connectionCheckoutTimeoutMilliseconds = connectionCheckoutTimeoutMilliseconds.map { max(0, $0) }
         self.maximumConnectionCount = connectionCount
         self.maximumIdleConnectionCount = max(0, min(maximumIdleConnectionCount, connectionCount))
         self.journalMode = journalMode

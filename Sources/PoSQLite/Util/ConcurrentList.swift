@@ -28,6 +28,12 @@ final class ConcurrentList<Value> {
         }
         return values.removeLast()
     }
+
+    var isEmpty: Bool {
+        spin.lock()
+        defer { spin.unlock() }
+        return values.isEmpty
+    }
     
     func clear() -> Int {
         spin.lock()

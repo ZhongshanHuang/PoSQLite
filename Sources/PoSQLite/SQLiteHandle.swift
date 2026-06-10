@@ -13,7 +13,7 @@ public enum SQLiteTransaction: String {
 }
 
 
-@safe public final class SQLiteHandle {
+@safe final class SQLiteHandle {
     @unsafe private var handle: SQLite3?
     public let path: String
     public let configuration: SQLiteConfiguration
@@ -71,6 +71,18 @@ extension SQLiteHandle {
     
     public func rollback() throws {
         try execute(sql: "ROLLBACK TRANSACTION;")
+    }
+
+    func savepoint(_ name: String) throws {
+        try execute(sql: "SAVEPOINT \(Self.quotedSavepointName(name));")
+    }
+
+    func releaseSavepoint(_ name: String) throws {
+        try execute(sql: "RELEASE SAVEPOINT \(Self.quotedSavepointName(name));")
+    }
+
+    func rollbackToSavepoint(_ name: String) throws {
+        try execute(sql: "ROLLBACK TO SAVEPOINT \(Self.quotedSavepointName(name));")
     }
     
     public func lastInsertRowID() -> Int {
@@ -146,13 +158,41 @@ extension SQLiteHandle {
 
     private func _prepare(statement sql: String) throws -> SQLiteStmt {
         let handle = try unsafe requireOpenHandle()
+        guard sql.utf8.count <= Int(Int32.max) else {
+            throw SQLiteError(
+                code: SQLITE_TOOBIG,
+                description: "SQL statement is too large.",
+                operation: "prepare",
+                sql: sql
+            )
+        }
+
         var statement: SQLite3Statement?
-        let result = unsafe sqlite3_prepare_v2(handle, sql, Int32(sql.utf8.count), &statement, nil)
+        var tail: String = ""
+        let result = sql.withCString { sqlPointer in
+            var tailPointer: UnsafePointer<CChar>?
+            let result = unsafe sqlite3_prepare_v2(handle, sqlPointer, Int32(sql.utf8.count), &statement, &tailPointer)
+            if let tailPointer = unsafe tailPointer, unsafe tailPointer.pointee != 0 {
+                tail = unsafe String(cString: tailPointer)
+            }
+            return result
+        }
         if result != SQLITE_OK {
             throw unsafe Self.error(
                 code: result,
                 database: handle,
                 fallback: "sqlite3_prepare_v2 failed.",
+                operation: "prepare",
+                sql: sql
+            )
+        }
+        if Self.containsTrailingStatement(tail) {
+            if let statement = unsafe statement {
+                unsafe sqlite3_finalize(statement)
+            }
+            throw SQLiteError(
+                code: SQLITE_MISUSE,
+                description: "SQL APIs that prepare a statement accept exactly one statement.",
                 operation: "prepare",
                 sql: sql
             )
@@ -274,5 +314,42 @@ extension SQLiteHandle {
     private static func extendedCode(database: SQLite3?) -> Int32? {
         guard let database = unsafe database else { return nil }
         return unsafe sqlite3_extended_errcode(database)
+    }
+
+    private static func quotedSavepointName(_ name: String) -> String {
+        SQL.quoteIdentifier(name)
+    }
+
+    private static func containsTrailingStatement(_ tail: String) -> Bool {
+        var index = tail.startIndex
+
+        while index < tail.endIndex {
+            let character = tail[index]
+            if character == ";" || character.isWhitespace {
+                index = tail.index(after: index)
+                continue
+            }
+
+            if tail[index...].hasPrefix("--") {
+                index = tail.index(index, offsetBy: 2)
+                while index < tail.endIndex, tail[index] != "\n" {
+                    index = tail.index(after: index)
+                }
+                continue
+            }
+
+            if tail[index...].hasPrefix("/*") {
+                index = tail.index(index, offsetBy: 2)
+                guard let end = tail[index...].range(of: "*/") else {
+                    return true
+                }
+                index = end.upperBound
+                continue
+            }
+
+            return true
+        }
+
+        return false
     }
 }

@@ -1,9 +1,6 @@
 import Foundation
 import SQLite3
 
-typealias RecyclableHandle = Recyclable<SQLiteHandlePool.HandleWrap>
-typealias RecyclableHandlePool = Recyclable<SQLiteHandlePool>
-
 final class SQLiteHandlePool: @unchecked Sendable {
     struct Key: Hashable, Sendable {
         let path: String
@@ -22,7 +19,7 @@ final class SQLiteHandlePool: @unchecked Sendable {
     nonisolated(unsafe) private static var pools: [Key: Wrap] = [:]
     private static var maxHardwareConcurrency: Int { ProcessInfo.processInfo.processorCount }
     
-    static func getHandlePool(with path: String, configuration: SQLiteConfiguration) -> RecyclableHandlePool {
+    static func getHandlePool(with path: String, configuration: SQLiteConfiguration) -> SQLiteHandlePoolReference {
         let key = Key(path: path, configuration: configuration)
 
         spin.lock()
@@ -38,7 +35,7 @@ final class SQLiteHandlePool: @unchecked Sendable {
         }
         
         wrap.reference += 1
-        return RecyclableHandlePool(wrap.handlePool) {
+        return SQLiteHandlePoolReference(wrap.handlePool) {
             spin.lock()
             defer { spin.unlock() }
             wrap.reference -= 1
@@ -65,7 +62,7 @@ final class SQLiteHandlePool: @unchecked Sendable {
     }
     
     private let rwlock = RWLock()
-    private let stateLock = UnfairLock()
+    private let checkoutLock = ConditionLock()
     private var aliveHandleCount = 0
     private var closed = false
     
@@ -75,14 +72,14 @@ final class SQLiteHandlePool: @unchecked Sendable {
     }
     
     var isDrained: Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
+        checkoutLock.lock()
+        defer { checkoutLock.unlock() }
         return aliveHandleCount == 0
     }
 
     var isClosed: Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
+        checkoutLock.lock()
+        defer { checkoutLock.unlock() }
         return closed
     }
     
@@ -104,26 +101,40 @@ final class SQLiteHandlePool: @unchecked Sendable {
         }
     }
     
-    func flowOut() throws -> RecyclableHandle {
-        var unlock = true
-        rwlock.lockRead()
-        defer { if unlock { rwlock.unlockRead() } }
-        try throwIfClosed()
-
-        var handleWrap = handles.popBack()
-        if handleWrap == nil {
-            try reserveAliveHandleSlot()
+    func flowOut() throws -> SQLitePooledHandleLease {
+        let deadline = checkoutDeadline()
+        while true {
+            var unlockRead = true
+            rwlock.lockRead()
             do {
-                handleWrap = try generate()
+                try throwIfClosed()
+
+                if let handle = handles.popBack() {
+                    unlockRead = false
+                    return SQLitePooledHandleLease(handle, onReturn: { self.flowBack(handle) })
+                }
+
+                if try reserveAliveHandleSlotIfAvailable() {
+                    let handle: HandleWrap
+                    do {
+                        handle = try generate()
+                    } catch {
+                        releaseAliveHandleSlots(1)
+                        throw error
+                    }
+                    unlockRead = false
+                    return SQLitePooledHandleLease(handle, onReturn: { self.flowBack(handle) })
+                }
             } catch {
-                releaseAliveHandleSlots(1)
+                if unlockRead {
+                    rwlock.unlockRead()
+                }
                 throw error
             }
-        }
-        unlock = false
 
-        let handle = handleWrap!
-        return RecyclableHandle(handle, onRecycled: { self.flowBack(handle) })
+            rwlock.unlockRead()
+            try waitForAvailableHandle(until: deadline)
+        }
     }
     
     private func flowBack(_ handleWrap: HandleWrap) {
@@ -131,6 +142,8 @@ final class SQLiteHandlePool: @unchecked Sendable {
         rwlock.unlockRead()
         if !inserted {
             releaseAliveHandleSlots(1)
+        } else {
+            signalCheckoutWaiter()
         }
     }
     
@@ -191,63 +204,111 @@ final class SQLiteHandlePool: @unchecked Sendable {
 }
 
 private extension SQLiteHandlePool {
-    func throwIfClosed() throws {
-        stateLock.lock()
-        let isClosed = closed
-        stateLock.unlock()
+    func checkoutDeadline() -> Date? {
+        guard let milliseconds = configuration.connectionCheckoutTimeoutMilliseconds else {
+            return nil
+        }
+        return Date().addingTimeInterval(Double(milliseconds) / 1_000)
+    }
 
-        if isClosed {
-            throw SQLiteError(
-                code: SQLITE_MISUSE,
-                description: "Database is closed.",
-                operation: "open_handle"
-            )
+    func throwIfClosed() throws {
+        checkoutLock.lock()
+        defer { checkoutLock.unlock() }
+        try throwIfClosedLocked()
+    }
+
+    func throwIfClosedLocked() throws {
+        if closed {
+            throw databaseClosedError()
         }
     }
 
     func reserveAliveHandleSlot() throws {
-        stateLock.lock()
+        guard try reserveAliveHandleSlotIfAvailable() else {
+            throw maximumConnectionCountError()
+        }
+    }
+
+    func reserveAliveHandleSlotIfAvailable() throws -> Bool {
+        checkoutLock.lock()
         if closed {
-            stateLock.unlock()
-            throw SQLiteError(
-                code: SQLITE_MISUSE,
-                description: "Database is closed.",
-                operation: "open_handle"
-            )
+            checkoutLock.unlock()
+            throw databaseClosedError()
         }
 
         guard aliveHandleCount < maximumConnectionCount else {
-            stateLock.unlock()
-            throw SQLiteError(
-                code: SQLITE_BUSY,
-                description: "The database reached its configured maximum connection count: \(maximumConnectionCount).",
-                operation: "open_handle"
-            )
+            checkoutLock.unlock()
+            return false
         }
-
         aliveHandleCount += 1
         let count = aliveHandleCount
-        stateLock.unlock()
+        checkoutLock.unlock()
 
         if count > SQLiteHandlePool.maxHardwareConcurrency {
             var warning = "The concurrency of database: \(path) with \(count)"
             warning.append(" exceeds the concurrency of hardware: \(SQLiteHandlePool.maxHardwareConcurrency)")
             SQLiteError.warning(warning)
         }
+        return true
     }
 
     func releaseAliveHandleSlots(_ count: Int) {
         guard count > 0 else { return }
 
-        stateLock.lock()
+        checkoutLock.lock()
         aliveHandleCount = max(0, aliveHandleCount - count)
-        stateLock.unlock()
+        checkoutLock.broadcast()
+        checkoutLock.unlock()
     }
 
     func markClosed() {
-        stateLock.lock()
+        checkoutLock.lock()
         closed = true
-        stateLock.unlock()
+        checkoutLock.broadcast()
+        checkoutLock.unlock()
+    }
+
+    func waitForAvailableHandle(until deadline: Date?) throws {
+        guard let deadline else {
+            throw maximumConnectionCountError()
+        }
+
+        checkoutLock.lock()
+        defer { checkoutLock.unlock() }
+        try throwIfClosedLocked()
+
+        if !handles.isEmpty || aliveHandleCount < maximumConnectionCount {
+            return
+        }
+
+        let timeout = deadline.timeIntervalSinceNow
+        guard timeout > 0 else {
+            throw maximumConnectionCountError()
+        }
+        checkoutLock.wait(timeout: timeout)
+        try throwIfClosedLocked()
+    }
+
+    func signalCheckoutWaiter() {
+        checkoutLock.lock()
+        checkoutLock.signal()
+        checkoutLock.unlock()
+    }
+
+    func maximumConnectionCountError() -> SQLiteError {
+        SQLiteError(
+            code: SQLITE_BUSY,
+            description: "Timed out waiting for an available database connection. The configured maximum connection count is \(maximumConnectionCount).",
+            operation: "open_handle"
+        )
+    }
+
+    func databaseClosedError() -> SQLiteError {
+        SQLiteError(
+            code: SQLITE_MISUSE,
+            description: "Database is closed.",
+            operation: "open_handle"
+        )
     }
 
     var maximumConnectionCount: Int {

@@ -76,7 +76,9 @@ try database.transaction { transaction in
 }
 ```
 
-The lower-level `prepare`, `executeUpdate`, `executeQuery`, and statement binding APIs are still available for advanced control.
+Nested transactions use SQLite savepoints, so an inner rollback does not automatically roll back the outer transaction.
+
+Use `withPreparedStatement(_:access:_:)` when you need direct statement control with automatic finalization. Use `prepare(statement:)` only when you need to manage the statement lifetime manually.
 
 ## Configuration
 
@@ -86,6 +88,7 @@ The lower-level `prepare`, `executeUpdate`, `executeQuery`, and statement bindin
 - `synchronous=NORMAL`
 - `foreign_keys=ON`
 - `busy_timeout=5000`
+- 5000 ms connection checkout timeout when the pool is full
 - `temp_store=MEMORY`
 - 64 MiB mmap size
 - 8 MiB page cache target
@@ -98,6 +101,7 @@ Override only the parts your app needs:
 ```swift
 let configuration = SQLiteConfiguration(
     busyTimeoutMilliseconds: 10_000,
+    connectionCheckoutTimeoutMilliseconds: 10_000,
     maximumConnectionCount: 4,
     maximumIdleConnectionCount: 2,
     additionalPragmas: [

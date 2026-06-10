@@ -5,7 +5,6 @@ protocol Lockable: AnyObject, Sendable {
     func unlock()
 }
 
-@available(iOS 10.0, OSX 10.12, watchOS 3.0, tvOS 10.0, *)
 final class UnfairLock: Lockable, @unchecked Sendable {
     @unsafe private var unfairLock = os_unfair_lock_s()
 
@@ -117,6 +116,10 @@ final class ConditionLock: Lockable, @unchecked Sendable {
 
     func signal() {
         unsafe pthread_cond_signal(&cond)
+    }
+
+    func broadcast() {
+        unsafe pthread_cond_broadcast(&cond)
     }
 }
 

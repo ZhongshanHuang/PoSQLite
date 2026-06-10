@@ -50,51 +50,67 @@ public enum SQLiteType: Int32 {
         try _checkResult(res, isStep: true, operation: "step")
         return res
     }
+
+    private func checkedBindPosition(_ position: Int) throws -> Int32 {
+        guard let sqlitePosition = Int32(exactly: position) else {
+            throw SQLiteError(
+                code: SQLITE_RANGE,
+                description: "Bind parameter position is out of range.",
+                operation: "bind",
+                sql: sql,
+                bind: .position(position)
+            )
+        }
+        return sqlitePosition
+    }
+
+    private func sqlitePosition(_ position: Int) -> Int32 {
+        Int32(exactly: position) ?? (position < 0 ? Int32.min : Int32.max)
+    }
     
     /* bind position */
     public func bind(position: Int, _ d: Double) throws {
-        try _checkResult(try _bindDouble(position: Int32(position), d), operation: "bind", bind: .position(position))
+        try _checkResult(try _bindDouble(position: checkedBindPosition(position), d), operation: "bind", bind: .position(position))
     }
     
     public func bind(position: Int, _ i: Int32) throws {
-        try _checkResult(try _bindInt32(position: Int32(position), i), operation: "bind", bind: .position(position))
+        try _checkResult(try _bindInt32(position: checkedBindPosition(position), i), operation: "bind", bind: .position(position))
     }
     
     public func bind(position: Int, _ i: Int) throws {
-        try _checkResult(try _bindInt64(position: Int32(position), Int64(i)), operation: "bind", bind: .position(position))
+        try _checkResult(try _bindInt64(position: checkedBindPosition(position), Int64(i)), operation: "bind", bind: .position(position))
     }
     
     public func bind(position: Int, _ i: Int64) throws {
-        try _checkResult(try _bindInt64(position: Int32(position), i), operation: "bind", bind: .position(position))
+        try _checkResult(try _bindInt64(position: checkedBindPosition(position), i), operation: "bind", bind: .position(position))
     }
     
     public func bind(position: Int, _ s: String) throws {
-        try _checkResult(try _bindText(position: Int32(position), s), operation: "bind", bind: .position(position))
+        try _checkResult(try _bindText(position: checkedBindPosition(position), s), operation: "bind", bind: .position(position))
     }
     
     public func bind(position: Int, _ b: [Int8]) throws {
-        try _checkResult(try _bindBlob(position: Int32(position), bytes: b), operation: "bind", bind: .position(position))
+        try _checkResult(try _bindBlob(position: checkedBindPosition(position), bytes: b), operation: "bind", bind: .position(position))
     }
     
     public func bind(position: Int, _ b: [UInt8]) throws {
-        try _checkResult(try _bindBlob(position: Int32(position), bytes: b), operation: "bind", bind: .position(position))
+        try _checkResult(try _bindBlob(position: checkedBindPosition(position), bytes: b), operation: "bind", bind: .position(position))
     }
 
-    @available(macOS 10.14.4, iOS 12.2, tvOS 12.2, watchOS 5.2, *)
     public func bind(position: Int, _ bytes: Span<UInt8>) throws {
-        try _checkResult(try _bindBlob(position: Int32(position), bytes: bytes), operation: "bind", bind: .position(position))
+        try _checkResult(try _bindBlob(position: checkedBindPosition(position), bytes: bytes), operation: "bind", bind: .position(position))
     }
 
     public func bind(position: Int, _ data: Data) throws {
-        try _checkResult(try _bindBlob(position: Int32(position), data: data), operation: "bind", bind: .position(position))
+        try _checkResult(try _bindBlob(position: checkedBindPosition(position), data: data), operation: "bind", bind: .position(position))
     }
     
     public func bindZeroBlob(position: Int, count: Int) throws {
-        try _checkResult(try _bindZeroBlob(position: Int32(position), count: Int32(count)), operation: "bind", bind: .position(position))
+        try _checkResult(try _bindZeroBlob(position: checkedBindPosition(position), count: count), operation: "bind", bind: .position(position))
     }
     
     public func bindNull(position: Int) throws {
-        try _checkResult(try _bindNull(position: Int32(position)), operation: "bind", bind: .position(position))
+        try _checkResult(try _bindNull(position: checkedBindPosition(position)), operation: "bind", bind: .position(position))
     }
     
     /* bind name */
@@ -127,7 +143,6 @@ public enum SQLiteType: Int32 {
         try _checkResult(try _bindBlob(position: bindParameterIndex(name: name), bytes: b), operation: "bind", bind: .name(name))
     }
 
-    @available(macOS 10.14.4, iOS 12.2, tvOS 12.2, watchOS 5.2, *)
     public func bind(name: String, _ bytes: Span<UInt8>) throws {
         try _checkResult(try _bindBlob(position: bindParameterIndex(name: name), bytes: bytes), operation: "bind", bind: .name(name))
     }
@@ -137,7 +152,7 @@ public enum SQLiteType: Int32 {
     }
     
     public func bindZeroBlob(name: String, count: Int) throws {
-        try _checkResult(try _bindZeroBlob(position: bindParameterIndex(name: name), count: Int32(count)), operation: "bind", bind: .name(name))
+        try _checkResult(try _bindZeroBlob(position: bindParameterIndex(name: name), count: count), operation: "bind", bind: .name(name))
     }
     
     public func bindNull(name: String) throws {
@@ -158,17 +173,25 @@ public enum SQLiteType: Int32 {
         }
         return idx
     }
+
+    public func bindParameterCount() throws -> Int {
+        Int(try _bindParameterCount())
+    }
+
+    public func bindParameterName(position: Int) throws -> String? {
+        try _bindParameterName(position: checkedBindPosition(position))
+    }
     
     public func columnName(position: Int) -> String {
-        _columnName(position: Int32(position))
+        _columnName(position: sqlitePosition(position))
     }
     
     public func columnDeclaredType(position: Int) -> String {
-        _columnDeclaredType(position: Int32(position))
+        _columnDeclaredType(position: sqlitePosition(position))
     }
     
     public func columnType(position: Int) -> SQLiteType {
-        let res = _columnType(position: Int32(position))
+        let res = _columnType(position: sqlitePosition(position))
         return SQLiteType(rawValue: res) ?? .null
     }
     
@@ -177,36 +200,35 @@ public enum SQLiteType: Int32 {
     }
     
     public func columnIntBlob<I: BinaryInteger>(position: Int) -> [I] {
-        _columnIntBlob(position: Int32(position))
+        _columnIntBlob(position: sqlitePosition(position))
     }
 
     public func columnBlob(position: Int) -> [UInt8] {
-        _columnBlob(position: Int32(position))
+        _columnBlob(position: sqlitePosition(position))
     }
 
-    @available(macOS 10.14.4, iOS 12.2, tvOS 12.2, watchOS 5.2, *)
     public func withColumnBlob<R>(position: Int, _ body: (Span<UInt8>) throws -> R) rethrows -> R {
-        try _withColumnBlob(position: Int32(position), body)
+        try _withColumnBlob(position: sqlitePosition(position), body)
     }
     
     public func columnText(position: Int) -> String {
-        _columnText(position: Int32(position))
+        _columnText(position: sqlitePosition(position))
     }
     
     public func columnDouble(position: Int) -> Double {
-        _columnDouble(position: Int32(position))
+        _columnDouble(position: sqlitePosition(position))
     }
     
     public func columnInt32(position: Int) -> Int32 {
-        _columnInt32(position: Int32(position))
+        _columnInt32(position: sqlitePosition(position))
     }
 
     public func columnInt64(position: Int) -> Int64 {
-        _columnInt64(position: Int32(position))
+        _columnInt64(position: sqlitePosition(position))
     }
     
     public func columnInt(position: Int) -> Int {
-        Int(_columnInt64(position: Int32(position)))
+        Int(_columnInt64(position: sqlitePosition(position)))
     }
 
     private func _reset() throws -> Int32 {
@@ -244,32 +266,53 @@ public enum SQLiteType: Int32 {
     }
 
     private func _bindText(position: Int32, _ value: String) throws -> Int32 {
-        unsafe sqlite3_bind_text(try _statement(), position, value, Int32(value.utf8.count), sqliteTransient)
+        let statement = try unsafe _statement()
+        return value.withCString { pointer in
+            unsafe sqlite3_bind_text64(statement, position, pointer, UInt64(value.utf8.count), sqliteTransient, UInt8(SQLITE_UTF8))
+        }
+    }
+
+    private func _bindBlobBuffer(statement: SQLite3Statement, position: Int32, bytes: UnsafeRawPointer?, count: Int) -> Int32 {
+        guard count > 0 else {
+            return unsafe sqlite3_bind_zeroblob64(statement, position, 0)
+        }
+        return unsafe sqlite3_bind_blob64(statement, position, bytes, UInt64(count), sqliteTransient)
     }
 
     private func _bindBlob(position: Int32, bytes: [Int8]) throws -> Int32 {
-        unsafe sqlite3_bind_blob(try _statement(), position, bytes, Int32(bytes.count), sqliteTransient)
+        let statement = try unsafe _statement()
+        return bytes.withUnsafeBufferPointer { buffer in
+            let baseAddress = unsafe buffer.baseAddress.map { unsafe UnsafeRawPointer($0) }
+            return unsafe _bindBlobBuffer(statement: statement, position: position, bytes: baseAddress, count: buffer.count)
+        }
     }
 
     private func _bindBlob(position: Int32, bytes: [UInt8]) throws -> Int32 {
-        unsafe sqlite3_bind_blob(try _statement(), position, bytes, Int32(bytes.count), sqliteTransient)
+        let statement = try unsafe _statement()
+        return bytes.withUnsafeBufferPointer { buffer in
+            let baseAddress = unsafe buffer.baseAddress.map { unsafe UnsafeRawPointer($0) }
+            return unsafe _bindBlobBuffer(statement: statement, position: position, bytes: baseAddress, count: buffer.count)
+        }
     }
 
-    @available(macOS 10.14.4, iOS 12.2, tvOS 12.2, watchOS 5.2, *)
     private func _bindBlob(position: Int32, bytes: Span<UInt8>) throws -> Int32 {
-        try unsafe bytes.withUnsafeBufferPointer { buffer in
-            unsafe sqlite3_bind_blob(try _statement(), position, buffer.baseAddress, Int32(buffer.count), sqliteTransient)
+        let statement = try unsafe _statement()
+        return bytes.withUnsafeBufferPointer { buffer in
+            let baseAddress = unsafe buffer.baseAddress.map { unsafe UnsafeRawPointer($0) }
+            return unsafe _bindBlobBuffer(statement: statement, position: position, bytes: baseAddress, count: buffer.count)
         }
     }
 
     private func _bindBlob(position: Int32, data: Data) throws -> Int32 {
-        try unsafe data.withUnsafeBytes { buffer in
-            unsafe sqlite3_bind_blob(try _statement(), position, buffer.baseAddress, Int32(buffer.count), sqliteTransient)
+        let statement = try unsafe _statement()
+        return unsafe data.withUnsafeBytes { buffer in
+            unsafe _bindBlobBuffer(statement: statement, position: position, bytes: buffer.baseAddress, count: buffer.count)
         }
     }
 
-    private func _bindZeroBlob(position: Int32, count: Int32) throws -> Int32 {
-        unsafe sqlite3_bind_zeroblob(try _statement(), position, count)
+    private func _bindZeroBlob(position: Int32, count: Int) throws -> Int32 {
+        guard count >= 0 else { return SQLITE_RANGE }
+        return unsafe sqlite3_bind_zeroblob64(try _statement(), position, UInt64(count))
     }
 
     private func _bindNull(position: Int32) throws -> Int32 {
@@ -278,6 +321,17 @@ public enum SQLiteType: Int32 {
 
     private func _bindParameterIndex(name: String) throws -> Int32 {
         unsafe sqlite3_bind_parameter_index(try _statement(), name)
+    }
+
+    private func _bindParameterCount() throws -> Int32 {
+        unsafe sqlite3_bind_parameter_count(try _statement())
+    }
+
+    private func _bindParameterName(position: Int32) throws -> String? {
+        guard let name = unsafe sqlite3_bind_parameter_name(try _statement(), position) else {
+            return nil
+        }
+        return unsafe String(cString: name)
     }
 
     private func _columnName(position: Int32) -> String {
@@ -325,16 +379,15 @@ public enum SQLiteType: Int32 {
         return unsafe Array(buffer)
     }
 
-    @available(macOS 10.14.4, iOS 12.2, tvOS 12.2, watchOS 5.2, *)
     private func _withColumnBlob<R>(position: Int32, _ body: (Span<UInt8>) throws -> R) rethrows -> R {
         guard let stat = unsafe stat else {
-            return try unsafe [UInt8]().withUnsafeBufferPointer {
+            return try [UInt8]().withUnsafeBufferPointer {
                 try body(unsafe Span(_unsafeElements: $0))
             }
         }
         let byteCount = unsafe Int(sqlite3_column_bytes(stat, position))
         guard byteCount > 0, let bytes = unsafe sqlite3_column_blob(stat, position) else {
-            return try unsafe [UInt8]().withUnsafeBufferPointer {
+            return try [UInt8]().withUnsafeBufferPointer {
                 try body(unsafe Span(_unsafeElements: $0))
             }
         }
