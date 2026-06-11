@@ -1,86 +1,7 @@
 import Foundation
+import Synchronization
 
-protocol Lockable: AnyObject, Sendable {
-    func lock()
-    func unlock()
-}
-
-final class UnfairLock: Lockable, @unchecked Sendable {
-    @unsafe private var unfairLock = os_unfair_lock_s()
-
-    func lock() {
-        unsafe os_unfair_lock_lock(&unfairLock)
-    }
-
-    func unlock() {
-        unsafe os_unfair_lock_unlock(&unfairLock)
-    }
-}
-
-final class Mutex: Lockable, @unchecked Sendable {
-    @unsafe private var mutex = pthread_mutex_t()
-
-    init() {
-        unsafe pthread_mutex_init(&mutex, nil)
-    }
-
-    deinit {
-        unsafe pthread_mutex_destroy(&mutex)
-    }
-
-    func lock() {
-        unsafe pthread_mutex_lock(&mutex)
-    }
-
-    func unlock() {
-        unsafe pthread_mutex_unlock(&mutex)
-    }
-}
-
-final class RecursiveMutex: Lockable, @unchecked Sendable {
-    @unsafe private var mutex = pthread_mutex_t()
-
-    init() {
-        var attr = pthread_mutexattr_t()
-        unsafe pthread_mutexattr_init(&attr)
-        unsafe pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE)
-        unsafe pthread_mutex_init(&mutex, &attr)
-    }
-
-    deinit {
-        unsafe pthread_mutex_destroy(&mutex)
-    }
-
-    func lock() {
-        unsafe pthread_mutex_lock(&mutex)
-    }
-
-    func unlock() {
-        unsafe pthread_mutex_unlock(&mutex)
-    }
-}
-
-final class Spin: Lockable, @unchecked Sendable {
-    private let locker: Lockable
-
-    init() {
-        if #available(iOS 10.0, macOS 10.12, watchOS 3.0, tvOS 10.0, *) {
-            locker = UnfairLock()
-        } else {
-            locker = Mutex()
-        }
-    }
-
-    func lock() {
-        locker.lock()
-    }
-
-    func unlock() {
-        locker.unlock()
-    }
-}
-
-final class ConditionLock: Lockable, @unchecked Sendable {
+final class ConditionLock: @unchecked Sendable {
     @unsafe private var mutex = pthread_mutex_t()
     @unsafe private var cond = pthread_cond_t()
 
@@ -124,14 +45,14 @@ final class ConditionLock: Lockable, @unchecked Sendable {
 }
 
 extension DispatchQueue {
-    static private let spin = Spin()
-    nonisolated(unsafe) static private var tracker: Set<String> = []
+    static private let onceTracker = Synchronization.Mutex<Set<String>>([])
 
     static func once(name: String, _ block: () -> Void) {
-        spin.lock(); defer { spin.unlock() }
-        guard unsafe !tracker.contains(name) else { return }
+        let shouldRun = onceTracker.withLock { tracker in
+            tracker.insert(name).inserted
+        }
+        guard shouldRun else { return }
         block()
-        unsafe tracker.insert(name)
     }
 }
 
@@ -154,7 +75,7 @@ final class RWLock: @unchecked Sendable {
 
     func lockRead() {
         unsafe pthread_mutex_lock(&mutex); defer { unsafe pthread_mutex_unlock(&mutex) }
-        while writer>0 || pending>0 {
+        while writer > 0 || pending > 0 {
             unsafe pthread_cond_wait(&cond, &mutex)
         }
         reader += 1
@@ -171,7 +92,7 @@ final class RWLock: @unchecked Sendable {
     func lockWrite() {
         unsafe pthread_mutex_lock(&mutex); defer { unsafe pthread_mutex_unlock(&mutex) }
         pending += 1
-        while writer>0||reader>0 {
+        while writer > 0 || reader > 0 {
             unsafe pthread_cond_wait(&cond, &mutex)
         }
         pending -= 1
@@ -186,46 +107,6 @@ final class RWLock: @unchecked Sendable {
 
     var isWriting: Bool {
         unsafe pthread_mutex_lock(&mutex); defer { unsafe pthread_mutex_unlock(&mutex) }
-        return writer>0
+        return writer > 0
     }
-
-//    var isReading: Bool {
-//        pthread_mutex_lock(&mutex); defer { pthread_mutex_unlock(&mutex) }
-//        return reader>0
-//    }
 }
-
-//final class WWLock {
-//    var mutex = pthread_mutex_t()
-//    var cond = pthread_cond_t()
-//    var writer = 0
-//
-//    init() {
-//        pthread_mutex_init(&mutex, nil)
-//        pthread_cond_init(&cond, nil)
-//    }
-//
-//    deinit {
-//        pthread_cond_destroy(&cond)
-//        pthread_mutex_destroy(&mutex)
-//    }
-//
-//    func lockWrite() {
-//        pthread_mutex_lock(&mutex); defer { pthread_mutex_unlock(&mutex) }
-//        while writer > 0 {
-//            pthread_cond_wait(&cond, &mutex)
-//        }
-//        writer += 1
-//    }
-//
-//    func unlockWrite() {
-//        pthread_mutex_lock(&mutex); defer { pthread_mutex_unlock(&mutex) }
-//        writer -= 1
-//        pthread_cond_broadcast(&cond)
-//    }
-//
-//    var isWriting: Bool {
-//        pthread_mutex_lock(&mutex); defer { pthread_mutex_unlock(&mutex) }
-//        return writer > 0
-//    }
-//}

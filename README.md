@@ -24,7 +24,7 @@ struct User: SQLiteRowDecodable {
 
 let database = SQLiteDatabase(path: "/tmp/app.sqlite")
 
-try database.run("""
+try database.execute("""
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS users (
 let name = "Ada"
 let age = 37
 let avatar = Data([0, 1, 2])
-let result = try database.run("""
+let result = try database.execute("""
 INSERT INTO users (name, age, avatar)
 VALUES (\(name), \(age), \(avatar))
 """)
@@ -50,7 +50,7 @@ let adultCount = try database.scalar("SELECT COUNT(*) FROM users WHERE age >= \(
 Interpolated values are always bound as parameters. They are not concatenated into the SQL string.
 
 ```swift
-try database.run("UPDATE users SET age = \(38) WHERE name = \("Ada")")
+try database.execute("UPDATE users SET age = \(38) WHERE name = \("Ada")")
 
 let rows = try database.fetch("SELECT id, name FROM users WHERE name = \(name)") { row in
     (id: try row.require("id", as: Int.self), name: try row.require("name", as: String.self))
@@ -68,8 +68,8 @@ Transactions keep all writes on the same SQLite handle and roll back on any thro
 
 ```swift
 try database.transaction { transaction in
-    try transaction.run("INSERT INTO users (name, age) VALUES (\("Grace"), \(40))")
-    try transaction.run("INSERT INTO users (name, age) VALUES (\("Linus"), \(nil as Int?))")
+    try transaction.execute("INSERT INTO users (name, age) VALUES (\("Grace"), \(40))")
+    try transaction.execute("INSERT INTO users (name, age) VALUES (\("Linus"), \(nil as Int?))")
 
     let count = try transaction.scalar("SELECT COUNT(*) FROM users", as: Int.self)
     print(count as Any)
@@ -78,7 +78,16 @@ try database.transaction { transaction in
 
 Nested transactions use SQLite savepoints, so an inner rollback does not automatically roll back the outer transaction.
 
-Use `withPreparedStatement(_:access:_:)` when you need direct statement control with automatic finalization. Use `prepare(statement:)` only when you need to manage the statement lifetime manually.
+Use `withPreparedStatement(_:access:_:)` when you need direct statement control with automatic finalization. Use `prepare(_:)` only when you need to manage the statement lifetime manually:
+
+```swift
+try database.withPreparedStatement("INSERT INTO users (name) VALUES (?)", access: .write) { statement in
+    try statement.bind(position: 1, "Manual")
+    try statement.step()
+}
+```
+
+`execute`, `fetch`, `fetchOne`, and `scalar` require every SQL placeholder to be bound by `SQL` interpolation or explicit `SQL("...", parameters:)`. Use `executeScript(_:)` only for raw multi-statement scripts; it does not bind values.
 
 ## Configuration
 
@@ -110,6 +119,13 @@ let configuration = SQLiteConfiguration(
 )
 
 let database = SQLiteDatabase(path: "/tmp/app.sqlite", configuration: configuration)
+```
+
+Connections are opened lazily. Call `open()` when you want to fail early instead of waiting for the first query:
+
+```swift
+try database.open()
+print(database.isOpen)
 ```
 
 `close()` permanently closes the database pool for the same path and configuration, and throws if the current thread still holds an active statement or transaction:

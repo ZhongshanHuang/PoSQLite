@@ -61,27 +61,21 @@ public final class SQLiteDatabase: @unchecked Sendable {
         return handleLease
     }
 
-    /// Since It is using lazy initialization,
-    /// `init(withPath:)`, `init(withFileURL:)` never failed even the database can't open.
-    /// So you can call this to check whether the database can be opened.
-    /// Return false if an error occurs during sqlite handle initialization.
-    public var canOpen: Bool {
-        return !handlePool.isClosed && (!handlePool.isDrained || ((try? handlePool.fillOne()) != nil))
-    }
-
-    /// Check database is already opened.
-    public var isOpened: Bool {
+    /// Check whether the database currently has at least one opened connection.
+    public var isOpen: Bool {
         return !handlePool.isClosed && !handlePool.isDrained
     }
-
-    /// Check whether database is blockaded.
-    public var isBlockaded: Bool {
-        return handlePool.isBlockaded
+    
+    /// Force lazy connection initialization and surface the underlying SQLite error if opening fails.
+    public func open() throws {
+        if handlePool.isClosed || handlePool.isDrained {
+            try handlePool.fillOne()
+        }
     }
-    
-    public typealias OnClosed = () throws -> Void
-    
-    public func close(onClosed: OnClosed) throws {
+
+    private typealias OnClosed = () throws -> Void
+
+    private func close(onClosed: OnClosed) throws {
         if Self.threadedHandles.value[identity] != nil {
             throw SQLiteError(
                 code: SQLITE_BUSY,
@@ -95,16 +89,6 @@ public final class SQLiteDatabase: @unchecked Sendable {
     /// Close the database.
     public func close() throws {
         try close(onClosed: {})
-    }
-
-    /// Blockade the database.
-    public func blockade() {
-        handlePool.blockade()
-    }
-
-    /// Unblockade the database.
-    public func unblockade() {
-        handlePool.unblockade()
     }
 
     /// Purge all unused memory of this database.
@@ -139,9 +123,7 @@ private extension SQLiteDatabase {
             return try body()
         }
 
-        handlePool.wLock()
-        defer { handlePool.wUnlock() }
-        return try body()
+        return try handlePool.withWriteLock(body)
     }
 
     func incrementTransactionDepth() {
@@ -184,9 +166,9 @@ private extension SQLiteDatabase {
 // MARK: - Base Operations
 extension SQLiteDatabase {
     
-    public func prepare(statement stat: String) throws -> SQLiteStmt {
+    private func makeStatement(_ statement: String) throws -> SQLiteStmt {
         let handleLease = try flowOut()
-        var stat = try handleLease.handle.prepare(statement: stat)
+        var stat = try handleLease.handle.prepare(statement: statement)
         let identity = identity
         handleLease.refCount += 1
         if handleLease.refCount == 1 {
@@ -199,6 +181,20 @@ extension SQLiteDatabase {
             }
         }
         return stat
+    }
+
+    public func prepare(_ sql: SQL) throws -> SQLiteStmt {
+        let statement = try makeStatement(sql.statement)
+        if !sql.parameters.isEmpty {
+            try statement.bind(sql.parameters)
+        }
+        return statement
+    }
+
+    private func prepareBound(_ sql: SQL) throws -> SQLiteStmt {
+        let statement = try makeStatement(sql.statement)
+        try statement.bind(sql.parameters)
+        return statement
     }
     
     private func begin(_ transaction: SQLiteTransaction) throws {
@@ -224,130 +220,79 @@ extension SQLiteDatabase {
         try handleLease.handle.rollback()
     }
     
-    public func lastInsertRowID() throws -> Int {
+    private func lastInsertRowID() throws -> Int {
         let handleLease = try flowOut()
         return handleLease.handle.lastInsertRowID()
     }
     
-    /// 自数据库链接被打开起，通过insert，update，delete语句所影响的数据行数
-    public func totalChanges() throws -> Int {
-        let handleLease = try flowOut()
-        return handleLease.handle.totalChanges()
-    }
-    
     /// 最近一条insert，update，delete语句所影响的数据行数
-    public func changes() throws -> Int {
+    private func changes() throws -> Int {
         let handleLease = try flowOut()
         return handleLease.handle.changes()
     }
-    
-    public func errCode() throws -> Int {
-        let handleLease = try flowOut()
-        return handleLease.handle.errCode()
-    }
-    
-    public func errMsg() throws -> String? {
-        let handleLease = try flowOut()
-        return handleLease.handle.errMsg()
-    }
-    
 }
 
 // MARK: - Convenience Operations
 extension SQLiteDatabase {
     public func withPreparedStatement<T>(
-        _ sql: String,
+        _ sql: SQL,
         access: SQLiteStatementAccess = .read,
         _ body: (_ statement: borrowing SQLiteStmt) throws -> T
     ) throws -> T {
         switch access {
         case .read:
-            var statement = try prepare(statement: sql)
+            var statement = try prepare(sql)
             defer { try? statement.finalize() }
             return try body(statement)
         case .write:
             return try withWriteLock {
-                var statement = try self.prepare(statement: sql)
+                var statement = try self.prepare(sql)
                 defer { try? statement.finalize() }
                 return try body(statement)
             }
         }
     }
 
-    @discardableResult
-    public func execute(_ sql: String) throws -> Int {
+    private func withBoundPreparedStatement<T>(
+        _ sql: SQL,
+        access: SQLiteStatementAccess = .read,
+        _ body: (_ statement: borrowing SQLiteStmt) throws -> T
+    ) throws -> T {
+        switch access {
+        case .read:
+            var statement = try prepareBound(sql)
+            defer { try? statement.finalize() }
+            return try body(statement)
+        case .write:
+            return try withWriteLock {
+                var statement = try self.prepareBound(sql)
+                defer { try? statement.finalize() }
+                return try body(statement)
+            }
+        }
+    }
+
+    public func executeScript(_ sql: String) throws {
         try withWriteLock {
             let handleLease = try flowOut()
             try handleLease.handle.execute(sql: sql)
-            return handleLease.handle.changes()
         }
     }
 
     @discardableResult
-    public func update(_ statement: String, parameters: [SQLiteValue] = []) throws -> Int {
-        try withPreparedStatement(statement, access: .write) { stat in
-            try stat.bind(parameters)
-            let result = try stat.step()
-            guard result == SQLITE_DONE else {
-                throw SQLiteError(
-                    code: SQLITE_MISUSE,
-                    description: "Use query APIs for statements that return rows.",
-                    operation: "update",
-                    sql: statement
-                )
-            }
-            return try changes()
-        }
-    }
-
-    public func query<T>(_ statement: String, parameters: [SQLiteValue] = [], map: (SQLiteRow) throws -> T) throws -> [T] {
-        var rows: [T] = []
-        try query(statement, parameters: parameters) { row in
-            rows.append(try map(row))
-        }
-        return rows
-    }
-
-    public func query(_ statement: String, parameters: [SQLiteValue] = [], handleRow: (SQLiteRow) throws -> Void) throws {
-        try withPreparedStatement(statement) { stat in
-            try stat.bind(parameters)
-            var result = try stat.step()
-            while result == SQLITE_ROW {
-                try handleRow(try SQLiteRow(statement: stat))
-                result = try stat.step()
-            }
-        }
-    }
-
-    public func firstRow(_ statement: String, parameters: [SQLiteValue] = []) throws -> SQLiteRow? {
-        try withPreparedStatement(statement) { stat in
-            try stat.bind(parameters)
-            guard try stat.step() == SQLITE_ROW else {
-                return nil
-            }
-            return try SQLiteRow(statement: stat)
-        }
-    }
-
-    public func scalar(_ statement: String, parameters: [SQLiteValue] = []) throws -> SQLiteValue? {
-        try firstRow(statement, parameters: parameters)?[0]
-    }
-
-    @discardableResult
-    public func run(_ sql: SQL) throws -> SQLiteRunResult {
-        try withPreparedStatement(sql.statement, access: .write) { statement in
-            try statement.bind(sql.parameters)
+    public func execute(_ sql: SQL) throws -> SQLiteExecutionResult {
+        try withBoundPreparedStatement(sql, access: .write) { statement in
             let result = try statement.step()
-            guard result == SQLITE_DONE else {
+            guard result == .done else {
                 throw SQLiteError(
                     code: SQLITE_MISUSE,
                     description: "Use fetch APIs for statements that return rows.",
-                    operation: "run",
+                    operation: "execute",
                     sql: sql.statement
                 )
             }
 
-            return SQLiteRunResult(
+            return SQLiteExecutionResult(
                 changes: try changes(),
                 lastInsertRowID: try lastInsertRowID()
             )
@@ -356,7 +301,7 @@ extension SQLiteDatabase {
 
     public func fetch<T>(_ sql: SQL, map: (SQLiteRow) throws -> T) throws -> [T] {
         var rows: [T] = []
-        try fetch(sql) { row in
+        try forEachRow(sql) { row in
             rows.append(try map(row))
         }
         return rows
@@ -366,21 +311,19 @@ extension SQLiteDatabase {
         try fetch(sql) { $0 }
     }
 
-    public func fetch(_ sql: SQL, handleRow: (SQLiteRow) throws -> Void) throws {
-        try withPreparedStatement(sql.statement) { statement in
-            try statement.bind(sql.parameters)
+    public func forEachRow(_ sql: SQL, _ body: (SQLiteRow) throws -> Void) throws {
+        try withBoundPreparedStatement(sql) { statement in
             var result = try statement.step()
-            while result == SQLITE_ROW {
-                try handleRow(try SQLiteRow(statement: statement))
+            while result == .row {
+                try body(try SQLiteRow(statement: statement))
                 result = try statement.step()
             }
         }
     }
 
     public func fetchOne(_ sql: SQL) throws -> SQLiteRow? {
-        try withPreparedStatement(sql.statement) { statement in
-            try statement.bind(sql.parameters)
-            guard try statement.step() == SQLITE_ROW else {
+        try withBoundPreparedStatement(sql) { statement in
+            guard try statement.step() == .row else {
                 return nil
             }
             return try SQLiteRow(statement: statement)
@@ -389,11 +332,6 @@ extension SQLiteDatabase {
 
     public func scalar(_ sql: SQL) throws -> SQLiteValue? {
         try fetchOne(sql)?[0]
-    }
-
-    @discardableResult
-    public func transaction<T>(_ mode: SQLiteTransaction = .immediate, _ body: () throws -> T) throws -> T {
-        try _transaction(mode, body)
     }
 
     @discardableResult
@@ -408,29 +346,28 @@ extension SQLiteDatabase {
             return try _savepoint(body)
         }
 
-        handlePool.wLock()
-        defer { handlePool.wUnlock() }
-
-        try begin(mode)
-        incrementTransactionDepth()
-        do {
-            let result = try body()
-            try commit()
-            decrementTransactionDepth()
-            return result
-        } catch {
-            let rollbackError: (any Error)?
+        return try handlePool.withWriteLock {
+            try begin(mode)
+            incrementTransactionDepth()
             do {
-                try rollback()
-                rollbackError = nil
+                let result = try body()
+                try commit()
+                decrementTransactionDepth()
+                return result
             } catch {
-                rollbackError = error
+                let rollbackError: (any Error)?
+                do {
+                    try rollback()
+                    rollbackError = nil
+                } catch {
+                    rollbackError = error
+                }
+                decrementTransactionDepth()
+                if let rollbackError {
+                    throw SQLiteTransactionError(primaryError: error, rollbackError: rollbackError)
+                }
+                throw error
             }
-            decrementTransactionDepth()
-            if let rollbackError {
-                throw SQLiteTransactionError(primaryError: error, rollbackError: rollbackError)
-            }
-            throw error
         }
     }
 

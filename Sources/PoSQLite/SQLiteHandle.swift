@@ -6,14 +6,14 @@ typealias SQLite3Statement = OpaquePointer
 
 /// 未加锁(UNLOCKED)、共享 (SHARED)、保留(RESERVED)、未决(PENDING)、排它(EXCLUSIVE)
 /// 事务获取锁的模式
-public enum SQLiteTransaction: String {
+public enum SQLiteTransaction: String, Sendable {
     case deferred = "BEGIN DEFERRED TRANSACTION" // UNLOCKED
     case immediate = "BEGIN IMMEDIATE TRANSACTION" // RESERVED
     case exclusive = "BEGIN EXCLUSIVE TRANSACTION" // EXCLUSIVE
 }
 
 
-@safe final class SQLiteHandle {
+@safe final class SQLiteHandle: @unchecked Sendable {
     @unsafe private var handle: SQLite3?
     public let path: String
     public let configuration: SQLiteConfiguration

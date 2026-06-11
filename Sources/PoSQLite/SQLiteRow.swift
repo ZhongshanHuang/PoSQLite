@@ -140,18 +140,7 @@ extension SQLiteRow {
 
         for position in 0..<count {
             names.append(statement.columnName(position: position))
-            switch statement.columnType(position: position) {
-            case .integer:
-                values.append(.integer(statement.columnInt64(position: position)))
-            case .float:
-                values.append(.double(statement.columnDouble(position: position)))
-            case .text:
-                values.append(.text(statement.columnText(position: position)))
-            case .blob:
-                values.append(.blob(statement.columnBlob(position: position)))
-            case .null:
-                values.append(.null)
-            }
+            values.append(statement.columnValue(position: position))
         }
 
         self.init(columnNames: names, values: values)
@@ -218,15 +207,21 @@ private extension SQLiteRow {
         case .null:
             return nil
         case .blob(let value):
-            return value
+            return Array(value)
         default:
             throw mismatch(column: column, expected: "BLOB", actual: value)
         }
     }
 
     func data(from value: SQLiteValue, column: String) throws -> Data? {
-        guard let bytes = try blob(from: value, column: column) else { return nil }
-        return Data(bytes)
+        switch value {
+        case .null:
+            return nil
+        case .blob(let value):
+            return value
+        default:
+            throw mismatch(column: column, expected: "BLOB", actual: value)
+        }
     }
 
     func mismatch(column: String, expected: String, actual: SQLiteValue) -> SQLiteError {
@@ -337,7 +332,7 @@ extension Array: SQLiteValueDecodable where Element == UInt8 {
         case .null:
             return nil
         case .blob(let value):
-            return value
+            return Array(value)
         default:
             throw SQLiteRow.typeMismatch(column: column, expected: "BLOB", actual: value)
         }
@@ -346,8 +341,14 @@ extension Array: SQLiteValueDecodable where Element == UInt8 {
 
 extension Data: SQLiteValueDecodable {
     public static func decodeSQLiteValue(_ value: SQLiteValue, column: String) throws -> Data? {
-        guard let bytes = try [UInt8].decodeSQLiteValue(value, column: column) else { return nil }
-        return Data(bytes)
+        switch value {
+        case .null:
+            return nil
+        case .blob(let value):
+            return value
+        default:
+            throw SQLiteRow.typeMismatch(column: column, expected: "BLOB", actual: value)
+        }
     }
 }
 

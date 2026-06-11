@@ -44,76 +44,12 @@ extension SQL: ExpressibleByStringInterpolation {
             statement += literal
         }
 
-        public mutating func appendInterpolation(_ value: SQLiteValue) {
-            appendValue(value)
+        public mutating func appendInterpolation<Value: SQLiteValueConvertible>(_ value: Value) {
+            appendValue(value.sqliteValue)
         }
 
-        public mutating func appendInterpolation(_ value: SQLiteValue?) {
-            appendValue(value ?? .null)
-        }
-
-        public mutating func appendInterpolation(_ value: Int) {
-            appendValue(SQLiteValue(value))
-        }
-
-        public mutating func appendInterpolation(_ value: Int?) {
-            appendValue(value.map { SQLiteValue($0) } ?? .null)
-        }
-
-        public mutating func appendInterpolation(_ value: Int32) {
-            appendValue(SQLiteValue(value))
-        }
-
-        public mutating func appendInterpolation(_ value: Int32?) {
-            appendValue(value.map { SQLiteValue($0) } ?? .null)
-        }
-
-        public mutating func appendInterpolation(_ value: Int64) {
-            appendValue(SQLiteValue(value))
-        }
-
-        public mutating func appendInterpolation(_ value: Int64?) {
-            appendValue(value.map { SQLiteValue($0) } ?? .null)
-        }
-
-        public mutating func appendInterpolation(_ value: Double) {
-            appendValue(SQLiteValue(value))
-        }
-
-        public mutating func appendInterpolation(_ value: Double?) {
-            appendValue(value.map { SQLiteValue($0) } ?? .null)
-        }
-
-        public mutating func appendInterpolation(_ value: Bool) {
-            appendValue(SQLiteValue(value))
-        }
-
-        public mutating func appendInterpolation(_ value: Bool?) {
-            appendValue(value.map { SQLiteValue($0) } ?? .null)
-        }
-
-        public mutating func appendInterpolation(_ value: String) {
-            appendValue(SQLiteValue(value))
-        }
-
-        public mutating func appendInterpolation(_ value: String?) {
-            appendValue(value.map { SQLiteValue($0) } ?? .null)
-        }
-
-        public mutating func appendInterpolation(_ value: [UInt8]) {
-            appendValue(SQLiteValue(value))
-        }
-
-        public mutating func appendInterpolation(_ value: [UInt8]?) {
-            appendValue(value.map { SQLiteValue($0) } ?? .null)
-        }
-
-        public mutating func appendInterpolation(_ value: Data) {
-            appendValue(SQLiteValue(value))
-        }
-
-        public mutating func appendInterpolation(_ value: Data?) {
-            appendValue(value.map { SQLiteValue($0) } ?? .null)
+        public mutating func appendInterpolation<Value: SQLiteValueConvertible>(_ value: Value?) {
+            appendValue(value?.sqliteValue ?? .null)
         }
 
         public mutating func appendInterpolation(raw sql: String) {
@@ -131,7 +67,7 @@ extension SQL: ExpressibleByStringInterpolation {
     }
 }
 
-public struct SQLiteRunResult: Equatable, Sendable {
+public struct SQLiteExecutionResult: Equatable, Sendable {
     public let changes: Int
     public let lastInsertRowID: Int
 }

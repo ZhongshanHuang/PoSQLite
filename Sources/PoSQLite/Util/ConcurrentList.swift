@@ -1,45 +1,42 @@
 import Foundation
+import Synchronization
 
-final class ConcurrentList<Value> {
+final class ConcurrentList<Value: Sendable> {
     let capacity: Int
-    private(set) var values: [Value] = []
-    private let spin = Spin()
+    private let values = Synchronization.Mutex<[Value]>([])
     
     init(capacity: Int) {
         self.capacity = capacity
     }
     
     func pushBack(_ value: Value) -> Bool {
-        spin.lock()
-        defer { spin.unlock() }
-        if values.count < capacity {
-            values.append(value)
-            return true
+        values.withLock { values in
+            if values.count < capacity {
+                values.append(value)
+                return true
+            }
+            return false
         }
-        return false
     }
     
     func popBack() -> Value? {
-        spin.lock()
-        defer { spin.unlock() }
-        
-        if values.isEmpty {
-            return nil
+        values.withLock { values in
+            if values.isEmpty {
+                return nil
+            }
+            return values.removeLast()
         }
-        return values.removeLast()
     }
 
     var isEmpty: Bool {
-        spin.lock()
-        defer { spin.unlock() }
-        return values.isEmpty
+        values.withLock { $0.isEmpty }
     }
     
     func clear() -> Int {
-        spin.lock()
-        defer { spin.unlock() }
-        let count = values.count
-        values.removeAll()
-        return count
+        values.withLock { values in
+            let count = values.count
+            values.removeAll()
+            return count
+        }
     }
 }

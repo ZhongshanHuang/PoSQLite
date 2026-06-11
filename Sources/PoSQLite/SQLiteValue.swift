@@ -6,7 +6,7 @@ public enum SQLiteValue: Equatable, Sendable {
     case integer(Int64)
     case double(Double)
     case text(String)
-    case blob([UInt8])
+    case blob(Data)
 
     public init(_ value: Int) {
         self = .integer(Int64(value))
@@ -33,12 +33,56 @@ public enum SQLiteValue: Equatable, Sendable {
     }
 
     public init(_ value: [UInt8]) {
-        self = .blob(value)
+        self = .blob(Data(value))
     }
 
     public init(_ value: Data) {
-        self = .blob(Array(value))
+        self = .blob(value)
     }
+}
+
+public protocol SQLiteValueConvertible: Sendable {
+    var sqliteValue: SQLiteValue { get }
+}
+
+extension SQLiteValue: SQLiteValueConvertible {
+    public var sqliteValue: SQLiteValue { self }
+}
+
+extension Int: SQLiteValueConvertible {
+    public var sqliteValue: SQLiteValue { SQLiteValue(self) }
+}
+
+extension Int32: SQLiteValueConvertible {
+    public var sqliteValue: SQLiteValue { SQLiteValue(self) }
+}
+
+extension Int64: SQLiteValueConvertible {
+    public var sqliteValue: SQLiteValue { SQLiteValue(self) }
+}
+
+extension Double: SQLiteValueConvertible {
+    public var sqliteValue: SQLiteValue { SQLiteValue(self) }
+}
+
+extension Bool: SQLiteValueConvertible {
+    public var sqliteValue: SQLiteValue { SQLiteValue(self) }
+}
+
+extension String: SQLiteValueConvertible {
+    public var sqliteValue: SQLiteValue { SQLiteValue(self) }
+}
+
+extension Data: SQLiteValueConvertible {
+    public var sqliteValue: SQLiteValue { SQLiteValue(self) }
+}
+
+extension Array: SQLiteValueConvertible where Element == UInt8 {
+    public var sqliteValue: SQLiteValue { SQLiteValue(self) }
+}
+
+extension Optional: SQLiteValueConvertible where Wrapped: SQLiteValueConvertible {
+    public var sqliteValue: SQLiteValue { self?.sqliteValue ?? .null }
 }
 
 extension SQLiteValue: ExpressibleByNilLiteral {
@@ -72,34 +116,12 @@ extension SQLiteValue: ExpressibleByBooleanLiteral {
 }
 
 public extension SQLiteStmt {
-    func bind(position: Int, _ value: SQLiteValue) throws {
-        switch value {
-        case .null:
-            try bindNull(position: position)
-        case .integer(let value):
-            try bind(position: position, value)
-        case .double(let value):
-            try bind(position: position, value)
-        case .text(let value):
-            try bind(position: position, value)
-        case .blob(let value):
-            try bind(position: position, value)
-        }
+    func bind<Value: SQLiteValueConvertible>(position: Int, _ value: Value) throws {
+        try bindSQLiteValue(position: position, value.sqliteValue)
     }
 
-    func bind(name: String, _ value: SQLiteValue) throws {
-        switch value {
-        case .null:
-            try bindNull(name: name)
-        case .integer(let value):
-            try bind(name: name, value)
-        case .double(let value):
-            try bind(name: name, value)
-        case .text(let value):
-            try bind(name: name, value)
-        case .blob(let value):
-            try bind(name: name, value)
-        }
+    func bind<Value: SQLiteValueConvertible>(name: String, _ value: Value) throws {
+        try bindSQLiteValue(name: name, value.sqliteValue)
     }
 
     func bind(_ values: [SQLiteValue]) throws {

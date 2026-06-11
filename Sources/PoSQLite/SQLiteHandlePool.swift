@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import Synchronization
 
 final class SQLiteHandlePool: @unchecked Sendable {
     struct Key: Hashable, Sendable {
@@ -15,32 +16,30 @@ final class SQLiteHandlePool: @unchecked Sendable {
         }
     }
     
-    private static let spin = Spin()
-    nonisolated(unsafe) private static var pools: [Key: Wrap] = [:]
+    private static let pools = Synchronization.Mutex<[Key: Wrap]>([:])
     private static var maxHardwareConcurrency: Int { ProcessInfo.processInfo.processorCount }
     
     static func getHandlePool(with path: String, configuration: SQLiteConfiguration) -> SQLiteHandlePoolReference {
         let key = Key(path: path, configuration: configuration)
 
-        spin.lock()
-        defer { spin.unlock() }
-        
-        let wrap: Wrap
-        if let existing = unsafe pools[key], !existing.handlePool.isClosed {
-            wrap = existing
-        } else {
-            let handlePool = SQLiteHandlePool(key: key)
-            wrap = Wrap(handlePool)
-            unsafe pools[key] = wrap
-        }
-        
-        wrap.reference += 1
-        return SQLiteHandlePoolReference(wrap.handlePool) {
-            spin.lock()
-            defer { spin.unlock() }
-            wrap.reference -= 1
-            if wrap.reference == 0, let current = unsafe pools[key], current === wrap {
-                unsafe pools.removeValue(forKey: key)
+        return pools.withLock { pools in
+            let wrap: Wrap
+            if let existing = pools[key], !existing.handlePool.isClosed {
+                wrap = existing
+            } else {
+                let handlePool = SQLiteHandlePool(key: key)
+                wrap = Wrap(handlePool)
+                pools[key] = wrap
+            }
+
+            wrap.reference += 1
+            return SQLiteHandlePoolReference(wrap.handlePool) {
+                Self.pools.withLock { pools in
+                    wrap.reference -= 1
+                    if wrap.reference == 0, let current = pools[key], current === wrap {
+                        pools.removeValue(forKey: key)
+                    }
+                }
             }
         }
     }
@@ -51,14 +50,12 @@ final class SQLiteHandlePool: @unchecked Sendable {
     let key: Key
     var path: String { key.path }
     var configuration: SQLiteConfiguration { key.configuration }
-    private let wwlock = UnfairLock()
-    
-    func wLock() {
-        wwlock.lock()
-    }
-    
-    func wUnlock() {
-        wwlock.unlock()
+    private let writeLock = Synchronization.Mutex<Void>(())
+
+    func withWriteLock<T>(_ body: () throws -> T) rethrows -> T {
+        try writeLock.withLock { _ in
+            try body()
+        }
     }
     
     private let rwlock = RWLock()
@@ -192,11 +189,8 @@ final class SQLiteHandlePool: @unchecked Sendable {
     }
     
     static func purgeFreeHandlesInAllPools() {
-        let handlePools: [SQLiteHandlePool]!
-        do {
-            spin.lock()
-            defer { spin.unlock() }
-            handlePools = unsafe pools.values.reduce(into: []) { $0.append($1.handlePool) }
+        let handlePools = pools.withLock { pools in
+            Array(pools.values.map(\.handlePool))
         }
         handlePools.forEach { $0.purgeFreeHandles() }
     }
