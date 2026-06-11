@@ -1,9 +1,8 @@
 import Foundation
-import Synchronization
 
 final class ConcurrentList<Value: Sendable> {
     let capacity: Int
-    private let values = Synchronization.Mutex<[Value]>([])
+    private let values = SQLiteMutex<[Value]>([])
     
     init(capacity: Int) {
         self.capacity = capacity

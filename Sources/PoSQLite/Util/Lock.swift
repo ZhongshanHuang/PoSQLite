@@ -1,5 +1,4 @@
 import Foundation
-import Synchronization
 
 final class ConditionLock: @unchecked Sendable {
     @unsafe private var mutex = pthread_mutex_t()
@@ -45,7 +44,7 @@ final class ConditionLock: @unchecked Sendable {
 }
 
 extension DispatchQueue {
-    static private let onceTracker = Synchronization.Mutex<Set<String>>([])
+    static private let onceTracker = SQLiteMutex<Set<String>>([])
 
     static func once(name: String, _ block: () -> Void) {
         let shouldRun = onceTracker.withLock { tracker in

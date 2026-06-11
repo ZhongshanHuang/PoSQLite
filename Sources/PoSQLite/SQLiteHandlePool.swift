@@ -1,6 +1,5 @@
 import Foundation
 import SQLite3
-import Synchronization
 
 final class SQLiteHandlePool: @unchecked Sendable {
     struct Key: Hashable, Sendable {
@@ -16,7 +15,7 @@ final class SQLiteHandlePool: @unchecked Sendable {
         }
     }
     
-    private static let pools = Synchronization.Mutex<[Key: Wrap]>([:])
+    private static let pools = SQLiteMutex<[Key: Wrap]>([:])
     private static var maxHardwareConcurrency: Int { ProcessInfo.processInfo.processorCount }
     
     static func getHandlePool(with path: String, configuration: SQLiteConfiguration) -> SQLiteHandlePoolReference {
@@ -50,7 +49,7 @@ final class SQLiteHandlePool: @unchecked Sendable {
     let key: Key
     var path: String { key.path }
     var configuration: SQLiteConfiguration { key.configuration }
-    private let writeLock = Synchronization.Mutex<Void>(())
+    private let writeLock = SQLiteMutex<Void>(())
 
     func withWriteLock<T>(_ body: () throws -> T) rethrows -> T {
         try writeLock.withLock { _ in
