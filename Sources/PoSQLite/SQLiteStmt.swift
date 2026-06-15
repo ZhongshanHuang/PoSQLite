@@ -203,8 +203,11 @@ public enum SQLiteStepResult: Int32, Sendable {
         try _withColumnBlob(position: sqlitePosition(position), body)
     }
 
-    func withBorrowedRow<R>(_ body: (_ row: borrowing SQLiteBorrowedRow) throws -> R) throws -> R {
-        let row = try unsafe SQLiteBorrowedRow(statement: _statement())
+    func withBorrowedRow<R>(
+        metadata: SQLiteRowMetadata,
+        _ body: (_ row: borrowing SQLiteBorrowedRow) throws -> R
+    ) throws -> R {
+        let row = try unsafe SQLiteBorrowedRow(statement: _statement(), metadata: metadata)
         return try body(row)
     }
 

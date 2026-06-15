@@ -94,6 +94,12 @@ final class PoSQLiteTests: XCTestCase {
             ]
         )
         XCTAssertEqual(try database.scalar("SELECT COUNT(*) FROM people"), .integer(1))
+        XCTAssertNil(try database.scalar("SELECT 1 WHERE 0"))
+
+        let duplicateColumns = try XCTUnwrap(database.fetchOne("SELECT 1 AS value, 2 AS value"))
+        XCTAssertEqual(duplicateColumns.columnNames, ["value", "value"])
+        XCTAssertEqual(duplicateColumns["value"], .integer(1))
+        XCTAssertEqual(duplicateColumns[1], .integer(2))
     }
 
     func testSQLInterpolationExecuteFetchAndScalarAPIs() throws {
@@ -265,6 +271,40 @@ final class PoSQLiteTests: XCTestCase {
         XCTAssertEqual(cache.count, 0)
         XCTAssertNil(cache.value(forKey: "a"))
         XCTAssertNil(cache.removeLeastRecentlyUsedValue())
+    }
+
+    func testThreadLocalValueAndWithValueMutateCurrentThreadStorageInPlace() throws {
+        let storage = ThreadLocal<[String: Int]>(defaultValue: [:])
+
+        storage.value["direct"] = 3
+        XCTAssertEqual(storage.value["direct"], 3)
+
+        storage.withValue { value in
+            value["main"] = 1
+        }
+        storage.withValue { value in
+            value["main", default: 0] += 1
+        }
+        XCTAssertEqual(storage.value["main"], 2)
+
+        storage.value = ["reset": 4]
+        XCTAssertEqual(storage.value, ["reset": 4])
+        storage.value["main"] = 2
+
+        let finished = DispatchSemaphore(value: 0)
+        let workerValue = ValueRecorder<Int>()
+        DispatchQueue.global(qos: .userInitiated).async {
+            storage.withValue { value in
+                value["worker"] = 7
+                workerValue.record(value["main"] ?? 0)
+            }
+            finished.signal()
+        }
+
+        XCTAssertEqual(finished.wait(timeout: .now() + .seconds(2)), .success)
+        XCTAssertEqual(workerValue.value, 0)
+        XCTAssertNil(storage.value["worker"])
+        XCTAssertEqual(storage.value["main"], 2)
     }
 
     func testReadOnlyConfigurationSkipsJournalModePragma() throws {
@@ -572,16 +612,19 @@ final class PoSQLiteTests: XCTestCase {
             let payload = try row.withBlob(named: "payload") { span in
                 span.withUnsafeBufferPointer { unsafe Array($0) }
             }
+            let payloadData = try row.data(named: "payload")
             return (
-                id: try row.require("id", as: Int.self),
-                name: try row.require("name", as: String.self),
-                payload: try XCTUnwrap(payload)
+                id: try XCTUnwrap(row.int(named: "id")),
+                name: try XCTUnwrap(row.string(named: "name")),
+                payload: try XCTUnwrap(payload),
+                payloadData: try XCTUnwrap(payloadData)
             )
         }
 
         XCTAssertEqual(rows.map(\.id), [1, 2])
         XCTAssertEqual(rows.map(\.name), ["first", "empty"])
         XCTAssertEqual(rows.map(\.payload), [[1, 2, 3], []])
+        XCTAssertEqual(rows.map(\.payloadData), [Data([1, 2, 3]), Data()])
 
         let nullPayload = try database.fetchOneBorrowed("SELECT NULL AS payload") { row in
             try row.withBlob(named: "payload") { span in

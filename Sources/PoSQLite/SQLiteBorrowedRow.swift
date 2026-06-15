@@ -3,31 +3,24 @@ import SQLite3
 
 @safe public struct SQLiteBorrowedRow: ~Copyable {
     @unsafe private let statement: SQLite3Statement
+    private let metadata: SQLiteRowMetadata
 
-    internal init(statement: SQLite3Statement) {
+    internal init(statement: SQLite3Statement, metadata: SQLiteRowMetadata) {
         unsafe self.statement = statement
+        self.metadata = metadata
     }
 
     public var count: Int {
-        unsafe Int(sqlite3_column_count(statement))
+        metadata.columnNames.count
     }
 
     public func columnName(at position: Int) throws -> String {
-        let position = try checkedColumnPosition(position)
-        guard let name = unsafe sqlite3_column_name(statement, position) else { return "" }
-        return unsafe String(cString: name)
+        let position = Int(try checkedColumnPosition(position))
+        return metadata.columnNames[position]
     }
 
     public func columnIndex(named name: String) -> Int? {
-        for position in 0..<count {
-            guard let columnName = unsafe sqlite3_column_name(statement, Int32(position)) else {
-                continue
-            }
-            if unsafe String(cString: columnName) == name {
-                return position
-            }
-        }
-        return nil
+        metadata.columnIndex(named: name)
     }
 
     public func value(at position: Int) throws -> SQLiteValue {
@@ -51,51 +44,143 @@ import SQLite3
     }
 
     public func string(at position: Int) throws -> String? {
-        try string(from: value(at: position), column: "\(position)")
+        let position = try checkedColumnPosition(position)
+        switch columnType(at: position) {
+        case .null:
+            return nil
+        case .text:
+            return columnText(at: position)
+        default:
+            throw mismatch(column: "\(position)", expected: "TEXT", actual: try value(at: Int(position)))
+        }
     }
 
     public func string(named name: String) throws -> String? {
-        try string(from: value(named: name), column: name)
+        let position = try columnIndexOrThrow(named: name)
+        switch columnType(at: Int32(position)) {
+        case .null:
+            return nil
+        case .text:
+            return columnText(at: Int32(position))
+        default:
+            throw mismatch(column: name, expected: "TEXT", actual: try value(at: position))
+        }
     }
 
     public func int64(at position: Int) throws -> Int64? {
-        try int64(from: value(at: position), column: "\(position)")
+        let position = try checkedColumnPosition(position)
+        switch columnType(at: position) {
+        case .null:
+            return nil
+        case .integer:
+            return unsafe sqlite3_column_int64(statement, position)
+        default:
+            throw mismatch(column: "\(position)", expected: "INTEGER", actual: try value(at: Int(position)))
+        }
     }
 
     public func int64(named name: String) throws -> Int64? {
-        try int64(from: value(named: name), column: name)
+        let position = try columnIndexOrThrow(named: name)
+        switch columnType(at: Int32(position)) {
+        case .null:
+            return nil
+        case .integer:
+            return unsafe sqlite3_column_int64(statement, Int32(position))
+        default:
+            throw mismatch(column: name, expected: "INTEGER", actual: try value(at: position))
+        }
     }
 
     public func int(at position: Int) throws -> Int? {
-        try int(from: value(at: position), column: "\(position)")
+        guard let value = try int64(at: position) else { return nil }
+        guard value >= Int64(Int.min), value <= Int64(Int.max) else {
+            throw SQLiteError(code: SQLITE_RANGE, description: "Column '\(position)' integer value is out of Int range.")
+        }
+        return Int(value)
     }
 
     public func int(named name: String) throws -> Int? {
-        try int(from: value(named: name), column: name)
+        guard let value = try int64(named: name) else { return nil }
+        guard value >= Int64(Int.min), value <= Int64(Int.max) else {
+            throw SQLiteError(code: SQLITE_RANGE, description: "Column '\(name)' integer value is out of Int range.")
+        }
+        return Int(value)
     }
 
     public func double(at position: Int) throws -> Double? {
-        try double(from: value(at: position), column: "\(position)")
+        let position = try checkedColumnPosition(position)
+        switch columnType(at: position) {
+        case .null:
+            return nil
+        case .float:
+            return unsafe sqlite3_column_double(statement, position)
+        case .integer:
+            return Double(unsafe sqlite3_column_int64(statement, position))
+        default:
+            throw mismatch(column: "\(position)", expected: "REAL", actual: try value(at: Int(position)))
+        }
     }
 
     public func double(named name: String) throws -> Double? {
-        try double(from: value(named: name), column: name)
+        let position = try columnIndexOrThrow(named: name)
+        switch columnType(at: Int32(position)) {
+        case .null:
+            return nil
+        case .float:
+            return unsafe sqlite3_column_double(statement, Int32(position))
+        case .integer:
+            return Double(unsafe sqlite3_column_int64(statement, Int32(position)))
+        default:
+            throw mismatch(column: name, expected: "REAL", actual: try value(at: position))
+        }
     }
 
     public func bool(at position: Int) throws -> Bool? {
-        try bool(from: value(at: position), column: "\(position)")
+        let position = try checkedColumnPosition(position)
+        switch columnType(at: position) {
+        case .null:
+            return nil
+        case .integer:
+            return unsafe sqlite3_column_int64(statement, position) != 0
+        default:
+            throw mismatch(column: "\(position)", expected: "INTEGER boolean", actual: try value(at: Int(position)))
+        }
     }
 
     public func bool(named name: String) throws -> Bool? {
-        try bool(from: value(named: name), column: name)
+        let position = try columnIndexOrThrow(named: name)
+        switch columnType(at: Int32(position)) {
+        case .null:
+            return nil
+        case .integer:
+            return unsafe sqlite3_column_int64(statement, Int32(position)) != 0
+        default:
+            throw mismatch(column: name, expected: "INTEGER boolean", actual: try value(at: position))
+        }
     }
 
     public func data(at position: Int) throws -> Data? {
-        try data(from: value(at: position), column: "\(position)")
+        let position = try checkedColumnPosition(position)
+        switch columnType(at: position) {
+        case .null:
+            return nil
+        case .blob:
+            return columnData(at: position)
+        default:
+            throw mismatch(column: "\(position)", expected: "BLOB", actual: try value(at: Int(position)))
+        }
     }
 
     public func data(named name: String) throws -> Data? {
-        try data(from: value(named: name), column: name)
+        let position = try columnIndexOrThrow(named: name)
+        switch columnType(at: Int32(position)) {
+        case .null:
+            return nil
+        case .blob:
+            return columnData(at: Int32(position))
+        default:
+            throw mismatch(column: name, expected: "BLOB", actual: try value(at: position))
+        }
     }
 
     public func get<T: SQLiteValueDecodable>(_ position: Int, as type: T.Type = T.self) throws -> T? {

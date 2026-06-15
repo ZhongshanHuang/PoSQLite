@@ -132,20 +132,18 @@ private extension SQLiteDatabase {
     }
 
     func incrementTransactionDepth() {
-        var depths = Self.threadedTransactionDepths.value
-        depths[identity, default: 0] += 1
-        Self.threadedTransactionDepths.value = depths
+        Self.threadedTransactionDepths.value[identity, default: 0] += 1
     }
 
     func decrementTransactionDepth() {
-        var depths = Self.threadedTransactionDepths.value
-        let nextDepth = (depths[identity] ?? 0) - 1
-        if nextDepth > 0 {
-            depths[identity] = nextDepth
-        } else {
-            depths.removeValue(forKey: identity)
+        Self.threadedTransactionDepths.withValue { depths in
+            let nextDepth = (depths[identity] ?? 0) - 1
+            if nextDepth > 0 {
+                depths[identity] = nextDepth
+            } else {
+                depths.removeValue(forKey: identity)
+            }
         }
-        Self.threadedTransactionDepths.value = depths
     }
 
     func releaseThreadedHandle(_ handleLease: SQLitePooledHandleLease) {

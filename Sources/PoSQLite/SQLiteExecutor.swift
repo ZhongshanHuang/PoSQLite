@@ -29,8 +29,16 @@ public extension SQLiteExecutor where Self: ~Copyable {
         try withPreparedStatement(SQL(sql.statement)) { statement in
             try statement.bind(sql.parameters)
             var result = try statement.step()
+            var metadata: SQLiteRowMetadata?
             while result == .row {
-                try body(try SQLiteRow(statement: statement))
+                let rowMetadata: SQLiteRowMetadata
+                if let metadata {
+                    rowMetadata = metadata
+                } else {
+                    rowMetadata = SQLiteRowMetadata(statement: statement)
+                    metadata = rowMetadata
+                }
+                try body(try SQLiteRow(statement: statement, metadata: rowMetadata))
                 result = try statement.step()
             }
         }
@@ -40,8 +48,16 @@ public extension SQLiteExecutor where Self: ~Copyable {
         try withPreparedStatement(SQL(sql.statement)) { statement in
             try statement.bind(sql.parameters)
             var result = try statement.step()
+            var metadata: SQLiteRowMetadata?
             while result == .row {
-                try statement.withBorrowedRow(body)
+                let rowMetadata: SQLiteRowMetadata
+                if let metadata {
+                    rowMetadata = metadata
+                } else {
+                    rowMetadata = SQLiteRowMetadata(statement: statement)
+                    metadata = rowMetadata
+                }
+                try statement.withBorrowedRow(metadata: rowMetadata, body)
                 result = try statement.step()
             }
         }
@@ -61,7 +77,7 @@ public extension SQLiteExecutor where Self: ~Copyable {
             guard try statement.step() == .row else {
                 return nil
             }
-            return try statement.withBorrowedRow(map)
+            return try statement.withBorrowedRow(metadata: SQLiteRowMetadata(statement: statement), map)
         }
     }
 
@@ -71,11 +87,17 @@ public extension SQLiteExecutor where Self: ~Copyable {
             guard try statement.step() == .row else {
                 return nil
             }
-            return try SQLiteRow(statement: statement)
+            return try SQLiteRow(statement: statement, metadata: SQLiteRowMetadata(statement: statement))
         }
     }
 
     func scalar(_ sql: SQL) throws -> SQLiteValue? {
-        try fetchOne(sql)?[0]
+        try withPreparedStatement(SQL(sql.statement)) { statement in
+            try statement.bind(sql.parameters)
+            guard try statement.step() == .row else {
+                return nil
+            }
+            return statement.columnValue(position: 0)
+        }
     }
 }
