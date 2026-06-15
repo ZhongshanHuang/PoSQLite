@@ -16,7 +16,7 @@ final class SQLiteHandlePool: @unchecked Sendable {
     }
     
     private static let pools = SQLiteMutex<[Key: Wrap]>([:])
-    private static var maxHardwareConcurrency: Int { ProcessInfo.processInfo.processorCount }
+    private static let maxHardwareConcurrency = ProcessInfo.processInfo.processorCount
     
     static func getHandlePool(with path: String, configuration: SQLiteConfiguration) -> SQLiteHandlePoolReference {
         let key = Key(path: path, configuration: configuration)
@@ -98,7 +98,16 @@ final class SQLiteHandlePool: @unchecked Sendable {
     }
     
     func flowOut() throws -> SQLitePooledHandleLease {
-        let deadline = checkoutDeadline()
+        var deadline: Date?
+        var didResolveDeadline = false
+        func resolvedDeadline() -> Date? {
+            if !didResolveDeadline {
+                deadline = checkoutDeadline()
+                didResolveDeadline = true
+            }
+            return deadline
+        }
+
         while true {
             var unlockRead = true
             rwlock.lockRead()
@@ -129,7 +138,7 @@ final class SQLiteHandlePool: @unchecked Sendable {
             }
 
             rwlock.unlockRead()
-            try waitForAvailableHandle(until: deadline)
+            try waitForAvailableHandle(until: resolvedDeadline())
         }
     }
     

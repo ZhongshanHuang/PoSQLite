@@ -614,10 +614,11 @@ final class PoSQLiteTests: XCTestCase {
             }
             let payloadData = try row.data(named: "payload")
             return (
-                id: try XCTUnwrap(row.int(named: "id")),
-                name: try XCTUnwrap(row.string(named: "name")),
+                id: try row.require("id", as: Int.self),
+                name: try row.require("name", as: String.self),
                 payload: try XCTUnwrap(payload),
-                payloadData: try XCTUnwrap(payloadData)
+                payloadData: try XCTUnwrap(payloadData),
+                payloadBytes: try row.require("payload", as: [UInt8].self)
             )
         }
 
@@ -625,6 +626,7 @@ final class PoSQLiteTests: XCTestCase {
         XCTAssertEqual(rows.map(\.name), ["first", "empty"])
         XCTAssertEqual(rows.map(\.payload), [[1, 2, 3], []])
         XCTAssertEqual(rows.map(\.payloadData), [Data([1, 2, 3]), Data()])
+        XCTAssertEqual(rows.map(\.payloadBytes), [[1, 2, 3], []])
 
         let nullPayload = try database.fetchOneBorrowed("SELECT NULL AS payload") { row in
             try row.withBlob(named: "payload") { span in

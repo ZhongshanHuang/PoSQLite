@@ -2,10 +2,13 @@ import Foundation
 
 final class ConcurrentList<Value: Sendable> {
     let capacity: Int
-    private let values = SQLiteMutex<[Value]>([])
+    private let values: SQLiteMutex<[Value]>
     
     init(capacity: Int) {
         self.capacity = capacity
+        var storage: [Value] = []
+        storage.reserveCapacity(capacity)
+        self.values = SQLiteMutex(storage)
     }
     
     func pushBack(_ value: Value) -> Bool {

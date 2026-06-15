@@ -182,8 +182,10 @@ extension SQLiteRow {
 
         values.reserveCapacity(count)
 
-        for position in 0..<count {
-            values.append(statement.columnValue(position: position))
+        var sqlitePosition: Int32 = 0
+        for _ in 0..<count {
+            values.append(statement.columnValue(sqlitePosition: sqlitePosition))
+            sqlitePosition &+= 1
         }
 
         self.init(metadata: metadata, values: values)

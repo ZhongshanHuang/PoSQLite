@@ -126,8 +126,10 @@ public extension SQLiteStmt {
 
     func bind(_ values: [SQLiteValue]) throws {
         try validatePositionalBindCount(values.count)
-        for (offset, value) in values.enumerated() {
-            try bind(position: offset + 1, value)
+        var sqlitePosition: Int32 = 1
+        for value in values {
+            try bindSQLiteValue(sqlitePosition: sqlitePosition, originalPosition: Int(sqlitePosition), value)
+            sqlitePosition &+= 1
         }
     }
 

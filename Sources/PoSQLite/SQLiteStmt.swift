@@ -54,8 +54,13 @@ public enum SQLiteStepResult: Int32, Sendable {
     @discardableResult
     public func step() throws -> SQLiteStepResult {
         let res = try _step()
-        try _checkResult(res, isStep: true, operation: "step")
-        guard let result = SQLiteStepResult(rawValue: res) else {
+        switch res {
+        case SQLITE_ROW:
+            return .row
+        case SQLITE_DONE:
+            return .done
+        default:
+            try _checkResult(res, isStep: true, operation: "step")
             throw SQLiteError(
                 code: SQLITE_MISUSE,
                 description: "Unexpected sqlite3_step result: \(res).",
@@ -63,7 +68,6 @@ public enum SQLiteStepResult: Int32, Sendable {
                 sql: sql
             )
         }
-        return result
     }
 
     private func checkedBindPosition(_ position: Int) throws -> Int32 {
@@ -109,6 +113,10 @@ public enum SQLiteStepResult: Int32, Sendable {
 
     func bindSQLiteValue(position: Int, _ value: SQLiteValue) throws {
         let sqlitePosition = try checkedBindPosition(position)
+        try bindSQLiteValue(sqlitePosition: sqlitePosition, originalPosition: position, value)
+    }
+
+    func bindSQLiteValue(sqlitePosition: Int32, originalPosition: Int, _ value: SQLiteValue) throws {
         let result: Int32
         switch value {
         case .null:
@@ -122,7 +130,7 @@ public enum SQLiteStepResult: Int32, Sendable {
         case .blob(let value):
             result = try _bindBlob(position: sqlitePosition, data: value)
         }
-        try _checkResult(result, operation: "bind", bind: .position(position))
+        try _checkResult(result, operation: "bind", bind: .position(originalPosition))
     }
 
     func bindSQLiteValue(name: String, _ value: SQLiteValue) throws {
@@ -185,7 +193,11 @@ public enum SQLiteStepResult: Int32, Sendable {
 
     public func columnValue(position: Int) -> SQLiteValue {
         let sqlitePosition = sqlitePosition(position)
-        switch columnType(position: position) {
+        return columnValue(sqlitePosition: sqlitePosition)
+    }
+
+    func columnValue(sqlitePosition: Int32) -> SQLiteValue {
+        switch columnType(sqlitePosition: sqlitePosition) {
         case .integer:
             return .integer(_columnInt64(position: sqlitePosition))
         case .float:
@@ -197,6 +209,10 @@ public enum SQLiteStepResult: Int32, Sendable {
         case .null:
             return .null
         }
+    }
+
+    private func columnType(sqlitePosition: Int32) -> SQLiteType {
+        SQLiteType(rawValue: _columnType(position: sqlitePosition)) ?? .null
     }
 
     public func withColumnBlob<R>(position: Int, _ body: (Span<UInt8>) throws -> R) rethrows -> R {

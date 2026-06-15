@@ -1,6 +1,14 @@
 import Foundation
 import SQLite3
 
+public protocol SQLiteBorrowedValueDecodable: SQLiteValueDecodable {
+    static func decodeSQLiteBorrowedValue(
+        _ row: borrowing SQLiteBorrowedRow,
+        position: Int,
+        column: String
+    ) throws -> Self?
+}
+
 @safe public struct SQLiteBorrowedRow: ~Copyable {
     @unsafe private let statement: SQLite3Statement
     private let metadata: SQLiteRowMetadata
@@ -187,8 +195,17 @@ import SQLite3
         try T.decodeSQLiteValue(value(at: position), column: "\(position)")
     }
 
+    public func get<T: SQLiteBorrowedValueDecodable>(_ position: Int, as type: T.Type = T.self) throws -> T? {
+        try T.decodeSQLiteBorrowedValue(self, position: position, column: "\(position)")
+    }
+
     public func get<T: SQLiteValueDecodable>(_ name: String, as type: T.Type = T.self) throws -> T? {
         try T.decodeSQLiteValue(value(named: name), column: name)
+    }
+
+    public func get<T: SQLiteBorrowedValueDecodable>(_ name: String, as type: T.Type = T.self) throws -> T? {
+        let position = try columnIndexOrThrow(named: name)
+        return try T.decodeSQLiteBorrowedValue(self, position: position, column: name)
     }
 
     public func require<T: SQLiteValueDecodable>(_ position: Int, as type: T.Type = T.self) throws -> T {
@@ -198,7 +215,21 @@ import SQLite3
         return value
     }
 
+    public func require<T: SQLiteBorrowedValueDecodable>(_ position: Int, as type: T.Type = T.self) throws -> T {
+        guard let value: T = try get(position, as: type) else {
+            throw nullValue(column: "\(position)")
+        }
+        return value
+    }
+
     public func require<T: SQLiteValueDecodable>(_ name: String, as type: T.Type = T.self) throws -> T {
+        guard let value: T = try get(name, as: type) else {
+            throw nullValue(column: name)
+        }
+        return value
+    }
+
+    public func require<T: SQLiteBorrowedValueDecodable>(_ name: String, as type: T.Type = T.self) throws -> T {
         guard let value: T = try get(name, as: type) else {
             throw nullValue(column: name)
         }
@@ -363,5 +394,86 @@ private extension SQLiteValue {
         case .blob:
             return "BLOB"
         }
+    }
+}
+
+extension SQLiteValue: SQLiteBorrowedValueDecodable {
+    public static func decodeSQLiteBorrowedValue(
+        _ row: borrowing SQLiteBorrowedRow,
+        position: Int,
+        column: String
+    ) throws -> SQLiteValue? {
+        try row.value(at: position)
+    }
+}
+
+extension String: SQLiteBorrowedValueDecodable {
+    public static func decodeSQLiteBorrowedValue(
+        _ row: borrowing SQLiteBorrowedRow,
+        position: Int,
+        column: String
+    ) throws -> String? {
+        try row.string(at: position)
+    }
+}
+
+extension Int64: SQLiteBorrowedValueDecodable {
+    public static func decodeSQLiteBorrowedValue(
+        _ row: borrowing SQLiteBorrowedRow,
+        position: Int,
+        column: String
+    ) throws -> Int64? {
+        try row.int64(at: position)
+    }
+}
+
+extension Int: SQLiteBorrowedValueDecodable {
+    public static func decodeSQLiteBorrowedValue(
+        _ row: borrowing SQLiteBorrowedRow,
+        position: Int,
+        column: String
+    ) throws -> Int? {
+        try row.int(at: position)
+    }
+}
+
+extension Double: SQLiteBorrowedValueDecodable {
+    public static func decodeSQLiteBorrowedValue(
+        _ row: borrowing SQLiteBorrowedRow,
+        position: Int,
+        column: String
+    ) throws -> Double? {
+        try row.double(at: position)
+    }
+}
+
+extension Bool: SQLiteBorrowedValueDecodable {
+    public static func decodeSQLiteBorrowedValue(
+        _ row: borrowing SQLiteBorrowedRow,
+        position: Int,
+        column: String
+    ) throws -> Bool? {
+        try row.bool(at: position)
+    }
+}
+
+extension Array: SQLiteBorrowedValueDecodable where Element == UInt8 {
+    public static func decodeSQLiteBorrowedValue(
+        _ row: borrowing SQLiteBorrowedRow,
+        position: Int,
+        column: String
+    ) throws -> [UInt8]? {
+        guard let data = try row.data(at: position) else { return nil }
+        return Array(data)
+    }
+}
+
+extension Data: SQLiteBorrowedValueDecodable {
+    public static func decodeSQLiteBorrowedValue(
+        _ row: borrowing SQLiteBorrowedRow,
+        position: Int,
+        column: String
+    ) throws -> Data? {
+        try row.data(at: position)
     }
 }
