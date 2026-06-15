@@ -61,7 +61,7 @@ Use explicit raw SQL or quoted identifiers only for SQL syntax, not user values:
 
 ```swift
 let table = "users"
-let rows = try database.fetch("SELECT \(raw: "COUNT(*)") FROM \(identifier: table)")
+let rows = try database.fetch("SELECT \(unsafeRaw: "COUNT(*)") FROM \(identifier: table)")
 ```
 
 Transactions keep all writes on the same SQLite handle and roll back on any thrown error:
@@ -78,7 +78,7 @@ try database.withTransaction { transaction in
 
 Nested transactions use SQLite savepoints, so an inner rollback does not automatically roll back the outer transaction.
 
-Use `withPreparedStatement(_:_:)` when you need direct statement control with automatic finalization. It automatically serializes statements that can write. Use `prepare(_:)` only when you need to manage the statement lifetime manually:
+Use `withPreparedStatement(_:_:)` when you need direct statement control with automatic finalization. It automatically serializes statements that can write and participates in the statement cache when enabled. Use `unsafePrepare(_:)` only when you need to manage the statement lifetime manually:
 
 ```swift
 try database.withPreparedStatement("INSERT INTO users (name) VALUES (?)") { statement in
@@ -87,7 +87,21 @@ try database.withPreparedStatement("INSERT INTO users (name) VALUES (?)") { stat
 }
 ```
 
-`execute`, `fetch`, `fetchOne`, and `scalar` require every SQL placeholder to be bound by `SQL` interpolation or explicit `SQL("...", parameters:)`. Use `executeRawScript(_:)` only for raw multi-statement scripts; it does not bind values.
+`execute`, `fetch`, `fetchOne`, and `scalar` require every SQL placeholder to be bound by `SQL` interpolation or explicit `SQL("...", parameters:)`. `\(unsafeRaw:)` is intentionally explicit; string literals work directly, dynamic fragments require `SQL.UnsafeRaw(...)`. Use `executeRawScript(_:)` only for raw multi-statement scripts; it does not bind values.
+
+Use `purgeStatementCache()` to drop cached prepared statements for one database, or `purgeAllStatementCaches()` to clear them across all databases.
+
+For large result sets or large blobs, use borrowed rows so blobs can be read as a `Span<UInt8>` inside the row callback:
+
+```swift
+try database.forEachBorrowedRow("SELECT id, payload FROM files") { row in
+    let id = try row.require("id", as: Int.self)
+    let size = try row.withBlob(named: "payload") { bytes in
+        bytes.count
+    }
+    print(id, size as Any)
+}
+```
 
 ## Configuration
 
@@ -103,6 +117,7 @@ try database.withPreparedStatement("INSERT INTO users (name) VALUES (?)") { stat
 - 8 MiB page cache target
 - 1000-page WAL autocheckpoint
 - 16 MiB journal size limit
+- statement cache disabled by default (`statementCacheCapacity: 0`)
 - capped connection pooling with a small idle handle cache
 
 Override only the parts your app needs:
@@ -113,6 +128,7 @@ let configuration = SQLiteConfiguration(
     connectionCheckoutTimeoutMilliseconds: 10_000,
     maximumConnectionCount: 4,
     maximumIdleConnectionCount: 2,
+    statementCacheCapacity: 64,
     additionalPragmas: [
         "PRAGMA user_version=1;"
     ]

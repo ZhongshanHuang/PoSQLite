@@ -19,17 +19,19 @@ public enum SQLiteStepResult: Int32, Sendable {
 @safe public struct SQLiteStmt: ~Copyable {
     @unsafe private var stat: SQLite3Statement!
     private let sql: String?
+    private let disposal: SQLiteStatementDisposal
     var lease: SQLiteStatementLease?
     
     deinit {
-        if unsafe self.stat != nil {
-            unsafe sqlite3_finalize(self.stat)
+        if let statement = unsafe self.stat {
+            unsafe _ = _dispose(statement)
         }
     }
     
-    internal init(stat: SQLite3Statement, sql: String? = nil) {
+    internal init(stat: SQLite3Statement, sql: String? = nil, disposal: SQLiteStatementDisposal = .finalize) {
         unsafe self.stat = stat
         self.sql = sql
+        self.disposal = disposal
     }
     
     public func reset(clearBindings: Bool = false) throws {
@@ -201,6 +203,11 @@ public enum SQLiteStepResult: Int32, Sendable {
         try _withColumnBlob(position: sqlitePosition(position), body)
     }
 
+    func withBorrowedRow<R>(_ body: (_ row: borrowing SQLiteBorrowedRow) throws -> R) throws -> R {
+        let row = try unsafe SQLiteBorrowedRow(statement: _statement())
+        return try body(row)
+    }
+
     func isReadOnly() throws -> Bool {
         unsafe sqlite3_stmt_readonly(try _statement()) != 0
     }
@@ -216,11 +223,32 @@ public enum SQLiteStepResult: Int32, Sendable {
     private mutating func _finalize() throws {
         guard let statement = unsafe self.stat else { return }
 
-        let database = unsafe sqlite3_db_handle(statement)
-        let result = unsafe sqlite3_finalize(statement)
         unsafe self.stat = nil
+        let result = unsafe _dispose(statement)
 
-        try unsafe Self._checkResult(result, database: database, fallback: "sqlite3_finalize", operation: "finalize", sql: sql)
+        try unsafe Self._checkResult(
+            result.code,
+            database: result.database,
+            fallback: result.fallback,
+            operation: result.operation,
+            sql: sql
+        )
+    }
+
+    private func _dispose(_ statement: SQLite3Statement) -> SQLiteStatementDisposalResult {
+        switch disposal {
+        case .finalize:
+            let database = unsafe sqlite3_db_handle(statement)
+            let result = unsafe sqlite3_finalize(statement)
+            return unsafe SQLiteStatementDisposalResult(
+                code: result,
+                database: database,
+                operation: "finalize",
+                fallback: "sqlite3_finalize failed."
+            )
+        case .cache(let cache, let sql):
+            return unsafe cache.store(statement, sql: sql)
+        }
     }
 
     private func _step() throws -> Int32 {

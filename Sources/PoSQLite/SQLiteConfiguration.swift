@@ -69,6 +69,7 @@ public struct SQLiteConfiguration: Hashable, Sendable {
     public var cacheSizeKiB: Int?
     public var tempStore: TempStore?
     public var journalSizeLimitBytes: Int64?
+    public var statementCacheCapacity: Int
     public var additionalPragmas: [String]
 
     public init(
@@ -88,6 +89,7 @@ public struct SQLiteConfiguration: Hashable, Sendable {
         cacheSizeKiB: Int? = 8 * 1024,
         tempStore: TempStore? = .memory,
         journalSizeLimitBytes: Int64? = 16 * 1024 * 1024,
+        statementCacheCapacity: Int = 0,
         additionalPragmas: [String] = []
     ) {
         let connectionCount = max(1, maximumConnectionCount)
@@ -108,6 +110,7 @@ public struct SQLiteConfiguration: Hashable, Sendable {
         self.cacheSizeKiB = cacheSizeKiB
         self.tempStore = tempStore
         self.journalSizeLimitBytes = journalSizeLimitBytes.map { max(0, $0) }
+        self.statementCacheCapacity = max(0, statementCacheCapacity)
         self.additionalPragmas = additionalPragmas
     }
 }

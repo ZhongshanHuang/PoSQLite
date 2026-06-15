@@ -186,12 +186,35 @@ final class SQLiteHandlePool: @unchecked Sendable {
         let size = handles.clear()
         releaseAliveHandleSlots(size)
     }
+
+    func purgeStatementCaches() {
+        rwlock.lockRead()
+        defer { rwlock.unlockRead() }
+        handles.forEach { handle in
+            handle.purgeStatementCache()
+        }
+    }
+
+    var cachedStatementCount: Int {
+        rwlock.lockRead()
+        defer { rwlock.unlockRead() }
+        return handles.sum { handle in
+            handle.cachedStatementCount
+        }
+    }
     
     static func purgeFreeHandlesInAllPools() {
         let handlePools = pools.withLock { pools in
             Array(pools.values.map(\.handlePool))
         }
         handlePools.forEach { $0.purgeFreeHandles() }
+    }
+
+    static func purgeStatementCachesInAllPools() {
+        let handlePools = pools.withLock { pools in
+            Array(pools.values.map(\.handlePool))
+        }
+        handlePools.forEach { $0.purgeStatementCaches() }
     }
 
 }

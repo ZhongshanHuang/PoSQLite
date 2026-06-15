@@ -1,6 +1,18 @@
 import Foundation
 
 public struct SQL: Equatable, Sendable, CustomStringConvertible {
+    public struct UnsafeRaw: ExpressibleByStringLiteral, Sendable {
+        let sql: String
+
+        public init(_ sql: String) {
+            self.sql = sql
+        }
+
+        public init(stringLiteral value: String) {
+            self.sql = value
+        }
+    }
+
     public let statement: String
     public let parameters: [SQLiteValue]
 
@@ -52,8 +64,8 @@ extension SQL: ExpressibleByStringInterpolation {
             appendValue(value?.sqliteValue ?? .null)
         }
 
-        public mutating func appendInterpolation(raw sql: String) {
-            statement += sql
+        public mutating func appendInterpolation(unsafeRaw sql: SQL.UnsafeRaw) {
+            statement += sql.sql
         }
 
         public mutating func appendInterpolation(identifier value: String) {

@@ -15,12 +15,16 @@ public enum SQLiteTransactionMode: String, Sendable {
 
 @safe final class SQLiteHandle: @unchecked Sendable {
     @unsafe private var handle: SQLite3?
+    private let statementCache: SQLiteStatementCache?
     public let path: String
     public let configuration: SQLiteConfiguration
 
     public init(withPath path: String, configuration: SQLiteConfiguration) {
         self.path = path
         self.configuration = configuration
+        self.statementCache = configuration.statementCacheCapacity > 0
+            ? SQLiteStatementCache(capacity: configuration.statementCacheCapacity)
+            : nil
     }
     
     public func open() throws {
@@ -54,7 +58,19 @@ public enum SQLiteTransactionMode: String, Sendable {
 // MARK: - Operations
 extension SQLiteHandle {
     public func prepare(statement stat: String) throws -> SQLiteStmt {
-        try _prepare(statement: stat)
+        try _prepare(statement: stat, disposal: .finalize)
+    }
+
+    func prepareCached(statement stat: String) throws -> SQLiteStmt {
+        guard let statementCache else {
+            return try prepare(statement: stat)
+        }
+
+        if let statement = unsafe statementCache.take(statement: stat) {
+            return unsafe SQLiteStmt(stat: statement, sql: stat, disposal: .cache(statementCache, sql: stat))
+        }
+
+        return try _prepare(statement: stat, disposal: .cache(statementCache, sql: stat))
     }
     
     public func execute(sql: String) throws {
@@ -123,12 +139,22 @@ extension SQLiteHandle {
         _errMsg()
     }
 
+    var cachedStatementCount: Int {
+        statementCache?.count ?? 0
+    }
+
+    func purgeStatementCache() {
+        statementCache?.clear()
+    }
+
     private func _open(flags: Int32) -> Int32 {
         unsafe sqlite3_open_v2(path, &handle, flags, nil)
     }
 
     private func _close() throws {
         guard unsafe handle != nil else { return }
+
+        statementCache?.clear()
 
         var result: Int32 = 0
         var stmtFinalized = false
@@ -156,7 +182,7 @@ extension SQLiteHandle {
         unsafe handle = nil
     }
 
-    private func _prepare(statement sql: String) throws -> SQLiteStmt {
+    private func _prepare(statement sql: String, disposal: SQLiteStatementDisposal) throws -> SQLiteStmt {
         let handle = try unsafe requireOpenHandle()
         guard sql.utf8.count <= Int(Int32.max) else {
             throw SQLiteError(
@@ -205,7 +231,7 @@ extension SQLiteHandle {
                 sql: sql
             )
         }
-        return unsafe SQLiteStmt(stat: statement, sql: sql)
+        return unsafe SQLiteStmt(stat: statement, sql: sql, disposal: disposal)
     }
 
     private func _execute(sql: String) throws {

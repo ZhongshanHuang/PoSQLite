@@ -38,4 +38,22 @@ final class ConcurrentList<Value: Sendable> {
             return count
         }
     }
+
+    func sum(_ value: (Value) throws -> Int) rethrows -> Int {
+        try values.withLock { values in
+            var total = 0
+            for item in values {
+                total += try value(item)
+            }
+            return total
+        }
+    }
+
+    func forEach(_ body: (Value) throws -> Void) rethrows {
+        try values.withLock { values in
+            for item in values {
+                try body(item)
+            }
+        }
+    }
 }

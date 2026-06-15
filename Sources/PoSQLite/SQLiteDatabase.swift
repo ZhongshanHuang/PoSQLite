@@ -100,10 +100,20 @@ public final class SQLiteDatabase: SQLiteExecutor, @unchecked Sendable {
         handlePool.purgeFreeHandles()
     }
 
+    /// Purge cached prepared statements held by idle connections of this database.
+    public func purgeStatementCache() {
+        handlePool.purgeStatementCaches()
+    }
+
     /// Purge all unused memory of all databases.
     /// Note that It will call this interface automatically while it receives memory warning on iOS.
     public static func purgeAllIdleConnections() {
         SQLiteHandlePool.purgeFreeHandlesInAllPools()
+    }
+
+    /// Purge cached prepared statements held by idle connections of all databases.
+    public static func purgeAllStatementCaches() {
+        SQLiteHandlePool.purgeStatementCachesInAllPools()
     }
     
 }
@@ -161,9 +171,11 @@ private extension SQLiteDatabase {
 // MARK: - Base Operations
 extension SQLiteDatabase {
     
-    private func makeStatement(_ statement: String) throws -> SQLiteStmt {
+    private func makeStatement(_ statement: String, cached: Bool) throws -> SQLiteStmt {
         let handleLease = try flowOut()
-        var stat = try handleLease.handle.prepare(statement: statement)
+        var stat = cached
+            ? try handleLease.handle.prepareCached(statement: statement)
+            : try handleLease.handle.prepare(statement: statement)
         let identity = identity
         handleLease.refCount += 1
         if handleLease.refCount == 1 {
@@ -178,8 +190,13 @@ extension SQLiteDatabase {
         return stat
     }
 
-    public func prepare(_ sql: SQL) throws -> SQLiteStmt {
-        let statement = try makeStatement(sql.statement)
+    /// Prepare a statement for manual lifetime management.
+    ///
+    /// This is an advanced escape hatch. Prefer `withPreparedStatement(_:_:)`,
+    /// `execute(_:)`, and `fetch` APIs so PoSQLite can serialize writes and
+    /// reuse cached statements safely.
+    public func unsafePrepare(_ sql: SQL) throws -> SQLiteStmt {
+        let statement = try makeStatement(sql.statement, cached: false)
         if !sql.parameters.isEmpty {
             try statement.bind(sql.parameters)
         }
@@ -187,7 +204,7 @@ extension SQLiteDatabase {
     }
 
     private func prepareBound(_ sql: SQL) throws -> SQLiteStmt {
-        let statement = try makeStatement(sql.statement)
+        let statement = try makeStatement(sql.statement, cached: true)
         try statement.bind(sql.parameters)
         return statement
     }
@@ -233,7 +250,10 @@ extension SQLiteDatabase {
         _ sql: SQL,
         _ body: (_ statement: borrowing SQLiteStmt) throws -> T
     ) throws -> T {
-        var statement = try prepare(sql)
+        var statement = try makeStatement(sql.statement, cached: true)
+        if !sql.parameters.isEmpty {
+            try statement.bind(sql.parameters)
+        }
         defer { try? statement.finalize() }
 
         if try statement.isReadOnly() {
@@ -353,4 +373,10 @@ extension SQLiteDatabase {
         }
     }
 
+}
+
+extension SQLiteDatabase {
+    var cachedStatementCount: Int {
+        handlePool.cachedStatementCount
+    }
 }

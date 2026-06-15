@@ -154,7 +154,7 @@ final class PoSQLiteTests: XCTestCase {
         )
 
         XCTAssertEqual(
-            try database.scalar("SELECT \(raw: "COUNT(*)") FROM \(identifier: table) WHERE name = \(name)"),
+            try database.scalar("SELECT \(unsafeRaw: "COUNT(*)") FROM \(identifier: table) WHERE name = \(name)"),
             .integer(1)
         )
     }
@@ -172,6 +172,99 @@ final class PoSQLiteTests: XCTestCase {
         XCTAssertEqual(try database.scalar("PRAGMA cache_size"), .integer(-8_192))
         XCTAssertEqual(try database.scalar("PRAGMA wal_autocheckpoint"), .integer(1_000))
         XCTAssertEqual(try database.scalar("PRAGMA journal_size_limit"), .integer(16 * 1024 * 1024))
+    }
+
+    func testStatementCacheCanBeEnabledDisabledAndCapped() throws {
+        let disabledConfiguration = SQLiteConfiguration(statementCacheCapacity: 0)
+        let (disabledDatabase, disabledURL) = makeDatabase(configuration: disabledConfiguration)
+        defer { cleanup(database: disabledDatabase, url: disabledURL) }
+
+        XCTAssertEqual(try disabledDatabase.scalar("SELECT 1"), .integer(1))
+        XCTAssertEqual(disabledDatabase.cachedStatementCount, 0)
+
+        let enabledConfiguration = SQLiteConfiguration(statementCacheCapacity: 2)
+        let (enabledDatabase, enabledURL) = makeDatabase(configuration: enabledConfiguration)
+        defer { cleanup(database: enabledDatabase, url: enabledURL) }
+
+        XCTAssertEqual(try enabledDatabase.scalar("SELECT 1"), .integer(1))
+        XCTAssertEqual(enabledDatabase.cachedStatementCount, 1)
+
+        XCTAssertEqual(try enabledDatabase.scalar("SELECT 1"), .integer(1))
+        XCTAssertEqual(enabledDatabase.cachedStatementCount, 1)
+
+        XCTAssertEqual(try enabledDatabase.scalar("SELECT 2"), .integer(2))
+        XCTAssertEqual(enabledDatabase.cachedStatementCount, 2)
+
+        XCTAssertEqual(try enabledDatabase.scalar("SELECT 3"), .integer(3))
+        XCTAssertEqual(enabledDatabase.cachedStatementCount, 2)
+
+        enabledDatabase.purgeStatementCache()
+        XCTAssertEqual(enabledDatabase.cachedStatementCount, 0)
+
+        XCTAssertEqual(try enabledDatabase.scalar("SELECT 4"), .integer(4))
+        XCTAssertEqual(enabledDatabase.cachedStatementCount, 1)
+    }
+
+    func testPurgeAllStatementCachesClearsIdleCachedStatementsAcrossDatabases() throws {
+        let configuration = SQLiteConfiguration(statementCacheCapacity: 2)
+        let (firstDatabase, firstURL) = makeDatabase(configuration: configuration)
+        let (secondDatabase, secondURL) = makeDatabase(configuration: configuration)
+        defer {
+            cleanup(database: firstDatabase, url: firstURL)
+            cleanup(database: secondDatabase, url: secondURL)
+        }
+
+        XCTAssertEqual(try firstDatabase.scalar("SELECT 1"), .integer(1))
+        XCTAssertEqual(try secondDatabase.scalar("SELECT 2"), .integer(2))
+        XCTAssertEqual(firstDatabase.cachedStatementCount, 1)
+        XCTAssertEqual(secondDatabase.cachedStatementCount, 1)
+
+        SQLiteDatabase.purgeAllStatementCaches()
+
+        XCTAssertEqual(firstDatabase.cachedStatementCount, 0)
+        XCTAssertEqual(secondDatabase.cachedStatementCount, 0)
+    }
+
+    func testFastLRUCacheMaintainsLRUOrderWithoutNodeReferences() throws {
+        var cache = FastLRUCache<String, Int>(capacity: 2)
+
+        XCTAssertNil(cache.insertValue(1, forKey: "a"))
+        XCTAssertNil(cache.insertValue(2, forKey: "b"))
+        XCTAssertEqual(cache.count, 2)
+
+        XCTAssertEqual(cache.value(forKey: "a"), 1)
+        XCTAssertEqual(cache.insertValue(3, forKey: "c"), 2)
+        XCTAssertNil(cache.value(forKey: "b"))
+        XCTAssertEqual(cache.value(forKey: "a"), 1)
+        XCTAssertEqual(cache.value(forKey: "c"), 3)
+
+        XCTAssertEqual(cache.insertValue(10, forKey: "a"), 1)
+        XCTAssertEqual(cache.count, 2)
+        XCTAssertEqual(cache.value(forKey: "a"), 10)
+
+        let doubled = try XCTUnwrap(cache.withValue(forKey: "c") { value in
+            value *= 2
+            return value
+        })
+        XCTAssertEqual(doubled, 6)
+
+        XCTAssertEqual(cache.insertValue(4, forKey: "d"), 10)
+        XCTAssertNil(cache.value(forKey: "a"))
+        XCTAssertEqual(cache.value(forKey: "c"), 6)
+        XCTAssertEqual(cache.value(forKey: "d"), 4)
+
+        XCTAssertEqual(cache.removeLeastRecentlyUsedValue(), 6)
+        XCTAssertEqual(cache.removeValue(forKey: "d"), 4)
+        XCTAssertTrue(cache.isEmpty)
+    }
+
+    func testFastLRUCacheCapacityZeroDoesNotRetainValues() {
+        var cache = FastLRUCache<String, Int>(capacity: 0)
+
+        XCTAssertEqual(cache.insertValue(1, forKey: "a"), 1)
+        XCTAssertEqual(cache.count, 0)
+        XCTAssertNil(cache.value(forKey: "a"))
+        XCTAssertNil(cache.removeLeastRecentlyUsedValue())
     }
 
     func testReadOnlyConfigurationSkipsJournalModePragma() throws {
@@ -226,7 +319,7 @@ final class PoSQLiteTests: XCTestCase {
         defer { cleanup(database: database, url: url) }
 
         try database.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
-        var statement = try database.prepare("SELECT COUNT(*) FROM items")
+        var statement = try database.unsafePrepare("SELECT COUNT(*) FROM items")
         defer { try? statement.finalize() }
 
         XCTAssertThrowsError(try database.close()) { error in
@@ -392,7 +485,7 @@ final class PoSQLiteTests: XCTestCase {
         defer { cleanup(database: database, url: url) }
 
         do {
-            _ = try database.prepare("-- comment only")
+            _ = try database.unsafePrepare("-- comment only")
             XCTFail("Expected an empty SQL statement to throw.")
         } catch let error as SQLiteError {
             XCTAssertEqual(error.code, SQLITE_MISUSE)
@@ -466,12 +559,45 @@ final class PoSQLiteTests: XCTestCase {
         }
     }
 
+    func testBorrowedRowAPIsReadValuesAndBlobSpans() throws {
+        let (database, url) = makeDatabase()
+        defer { cleanup(database: database, url: url) }
+
+        try database.execute("CREATE TABLE blobs (id INTEGER PRIMARY KEY, name TEXT NOT NULL, payload BLOB);")
+        try database.execute("INSERT INTO blobs (name, payload) VALUES (\("first"), \([1, 2, 3] as [UInt8]))")
+        try database.execute("INSERT INTO blobs (name, payload) VALUES (\("empty"), \([] as [UInt8]))")
+
+        let rows = try database.fetchBorrowed("SELECT id, name, payload FROM blobs ORDER BY id") { row in
+            XCTAssertEqual(try row.columnName(at: 0), "id")
+            let payload = try row.withBlob(named: "payload") { span in
+                span.withUnsafeBufferPointer { unsafe Array($0) }
+            }
+            return (
+                id: try row.require("id", as: Int.self),
+                name: try row.require("name", as: String.self),
+                payload: try XCTUnwrap(payload)
+            )
+        }
+
+        XCTAssertEqual(rows.map(\.id), [1, 2])
+        XCTAssertEqual(rows.map(\.name), ["first", "empty"])
+        XCTAssertEqual(rows.map(\.payload), [[1, 2, 3], []])
+
+        let nullPayload = try database.fetchOneBorrowed("SELECT NULL AS payload") { row in
+            try row.withBlob(named: "payload") { span in
+                span.withUnsafeBufferPointer { unsafe Array($0) }
+            }
+        }
+        let nullPayloadValue = try XCTUnwrap(nullPayload)
+        XCTAssertNil(nullPayloadValue)
+    }
+
     func testCloseWaitsForActiveStatementLease() throws {
         let (database, url) = makeDatabase()
         try database.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
         try database.execute("INSERT INTO items (name) VALUES (\("held"))")
 
-        var statement = try database.prepare("SELECT name FROM items")
+        var statement = try database.unsafePrepare("SELECT name FROM items")
         XCTAssertEqual(try statement.step(), .row)
 
         let closeStarted = DispatchSemaphore(value: 0)
@@ -509,7 +635,7 @@ final class PoSQLiteTests: XCTestCase {
         try database.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
         try database.execute("INSERT INTO items (name) VALUES (\("held"))")
 
-        var statement = try database.prepare("SELECT name FROM items")
+        var statement = try database.unsafePrepare("SELECT name FROM items")
         XCTAssertEqual(try statement.step(), .row)
 
         let started = DispatchSemaphore(value: 0)
@@ -547,7 +673,7 @@ final class PoSQLiteTests: XCTestCase {
         try database.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
         try database.execute("INSERT INTO items (name) VALUES (\("held"))")
 
-        var statement = try database.prepare("SELECT name FROM items")
+        var statement = try database.unsafePrepare("SELECT name FROM items")
         defer { try? statement.finalize() }
         XCTAssertEqual(try statement.step(), .row)
 
@@ -661,7 +787,7 @@ final class PoSQLiteTests: XCTestCase {
 
         let sql = "SELECT :expected"
         let missingName = ":missing"
-        var statement = try database.prepare(SQL(sql))
+        var statement = try database.unsafePrepare(SQL(sql))
         defer { try? statement.finalize() }
 
         do {
@@ -704,7 +830,7 @@ final class PoSQLiteTests: XCTestCase {
         let (database, url) = makeDatabase()
         defer { cleanup(database: database, url: url) }
 
-        var statement = try database.prepare("SELECT ?")
+        var statement = try database.unsafePrepare("SELECT ?")
         defer { try? statement.finalize() }
 
         let overflowingPosition = Int(Int32.max) + 1
@@ -727,7 +853,7 @@ final class PoSQLiteTests: XCTestCase {
         let (database, url) = makeDatabase()
         defer { cleanup(database: database, url: url) }
 
-        var statement = try database.prepare("SELECT :expected")
+        var statement = try database.unsafePrepare("SELECT :expected")
         defer { try? statement.finalize() }
 
         XCTAssertThrowsError(try statement.bind([":missing": 1])) { error in

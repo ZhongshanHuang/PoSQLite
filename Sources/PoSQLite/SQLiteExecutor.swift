@@ -36,6 +36,35 @@ public extension SQLiteExecutor where Self: ~Copyable {
         }
     }
 
+    func forEachBorrowedRow(_ sql: SQL, _ body: (_ row: borrowing SQLiteBorrowedRow) throws -> Void) throws {
+        try withPreparedStatement(SQL(sql.statement)) { statement in
+            try statement.bind(sql.parameters)
+            var result = try statement.step()
+            while result == .row {
+                try statement.withBorrowedRow(body)
+                result = try statement.step()
+            }
+        }
+    }
+
+    func fetchBorrowed<T>(_ sql: SQL, map: (_ row: borrowing SQLiteBorrowedRow) throws -> T) throws -> [T] {
+        var rows: [T] = []
+        try forEachBorrowedRow(sql) { row in
+            rows.append(try map(row))
+        }
+        return rows
+    }
+
+    func fetchOneBorrowed<T>(_ sql: SQL, map: (_ row: borrowing SQLiteBorrowedRow) throws -> T) throws -> T? {
+        try withPreparedStatement(SQL(sql.statement)) { statement in
+            try statement.bind(sql.parameters)
+            guard try statement.step() == .row else {
+                return nil
+            }
+            return try statement.withBorrowedRow(map)
+        }
+    }
+
     func fetchOne(_ sql: SQL) throws -> SQLiteRow? {
         try withPreparedStatement(SQL(sql.statement)) { statement in
             try statement.bind(sql.parameters)
